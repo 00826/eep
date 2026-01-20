@@ -125,7 +125,7 @@ local eep = {
 			pull = 200;
 			exclusivelowerbound = { sortKey = 0; };
 
-			tasktype = "local" ::
+			tasktype = "global" ::
 				| "local" --- matchmaking step contained to this server
 				| "global"; --- matchmaking step contained to partystore
 			
@@ -776,8 +776,18 @@ function eep.partyheartbeat(activitymap: { __studioactivity: string; __defaultac
 			--- teleport
 			eep.partyteleportstep()
 
+			--- convert to getasyncresult
+			local fakegetasyncresult = {}
+			for _, party in ipairs(eep.party.value) do
+				table.insert(fakegetasyncresult, {
+					key = party.key;
+					sortKey = party.timestamp;
+					value = party;
+				})
+			end
+
 			--- pool local parties, apply matchmaking
-			local pool = eep.createpool(eep.party.value)
+			local pool = eep.createpool(fakegetasyncresult)
 			local receipt = eep.poolallocatestep(pool, activitymap)
 			local partykeyaccesscodemap = eep.poolpopulatestep(receipt)
 			local writeaccesscodesuccess = eep.poolwriteaccesscodestep(partykeyaccesscodemap)
@@ -799,7 +809,11 @@ function eep.partyheartbeat(activitymap: { __studioactivity: string; __defaultac
 
 			if hastalkingstick == true then
 				--- getrangeasync pull
-				local getrangeasyncsuccess, getrangeasyncresult: { typeof(eep.party.value[1]) }? = pcall(
+				local getrangeasyncsuccess, getrangeasyncresult: { {
+					key: string;
+					sortKey: number;
+					value: typeof(eep.party.value[1]);
+				} }? = pcall(
 					partysortedmap.GetRangeAsync,
 					partysortedmap,
 					Enum.SortDirection.Ascending,
@@ -928,23 +942,28 @@ end
 
 --- creates a queued-for-activity pool \
 --- `{[string activitykey]: { {key: string; userids: {number}} }}`
-function eep.createpool(getrangeasyncresult: { typeof(eep.party.value[1]) })
+function eep.createpool(getrangeasyncresult: {{
+	key: string;
+	sortKey: number;
+	value: typeof(eep.party.value[1]);
+}})
 	local pool = {
 		--- population `{[string activitykey]: number # userids queued}`
 		__pop = {};
 	}
 
-	for i, p in ipairs(getrangeasyncresult) do
+	for i, v in ipairs(getrangeasyncresult) do
+		local party = v.value
 		--- do not consider if empty activitykey
-		local activitykey = p.activitykey
+		local activitykey = party.activitykey
 		if activitykey == "" then continue end
 
 		--- do not consider if already has accesscode
-		local accesscode = p.accesscode
+		local accesscode = party.accesscode
 		if accesscode ~= "" then continue end
 
 		--- do not consider if timestamp is lt 0 (indicates dequeued)
-		local timestamp = p.timestamp
+		local timestamp = party.timestamp
 		if timestamp == -1 then continue end
 
 		if not pool[activitykey] then
@@ -954,8 +973,8 @@ function eep.createpool(getrangeasyncresult: { typeof(eep.party.value[1]) })
 			pool.__pop[activitykey] = 0
 		end
 
-		table.insert(pool[activitykey], { key = p.key; userids = p.userids; })
-		pool.__pop[activitykey] += #p.userids
+		table.insert(pool[activitykey], { key = party.key; userids = party.userids; })
+		pool.__pop[activitykey] += #party.userids
 	end
 
 	return pool
