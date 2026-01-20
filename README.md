@@ -129,22 +129,22 @@ type sharedinstance = {
 	peers: {
 		{
 			--- index of this peer relative to the sharedinstance
-			index = i;
+			index: number;
 			--- variable read-write table for game-specific code
-			value = {  };
+			value: {  };
 			--- last time this peer was resynced
-			timestamp = -1;
+			timestamp: number;
 
 			--- userids allocated to this peer
-			expectinguserids = {  };
+			expectinguserids: {number};
 			--- party keys associated with this peer
 			--- (technically they get dissolved when teleported but exists for posterity)
-			partykeys = {  };
+			partykeys: {string};
 
 			--- reservedserver accesscode
-			accesscode = "";
+			accesscode: string;
 			--- reservedserver privateserverid
-			privateserverid = "";
+			privateserverid: string;
 		}
 	};
 }

@@ -110,7 +110,43 @@ local eep = {
 		peervalue = {};
 
 		key = "";
-		value = {};
+		value = {} :: {
+			--- activity key for this sharedinstance
+			activitykey: string;
+
+			--- unique identifier (guid) for this sharedinstance
+			key: string;
+			--- unix timestamp, in milliseconds, of when this sharedinstance was instantiated
+			timestamp: number;
+
+			--- peerindex of peer that concluded this sharedinstance
+			concludeindex: number;
+			--- unix timestamp, in milliseconds, of when this sharedinstance was concluded
+			concludetimestamp: number;
+
+			--- peers
+			peers: {
+				{
+					--- index of this peer relative to the sharedinstance
+					index: number;
+					--- variable read-write table for game-specific code
+					value: {  };
+					--- last time this peer was resynced
+					timestamp: number;
+
+					--- userids allocated to this peer
+					expectinguserids: {number};
+					--- party keys associated with this peer
+					--- (technically they get dissolved when teleported but exists for posterity)
+					partykeys: {string};
+
+					--- reservedserver accesscode
+					accesscode: string;
+					--- reservedserver privateserverid
+					privateserverid: string;
+				}
+			};
+		};
 
 		emptyreserveserverstring = "~";
 	};
