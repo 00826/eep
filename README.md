@@ -1,10 +1,12 @@
 # eepㅤ/ephemeral entrypoint/
 
+variable ssa entrypoint, shared instances, and activity matchmaking for single-place games
+
 ## about
 
 |ico.svg|lore|
 |-|-|
-|<img src="./eep-ico.svg" width="96"/>|variable ssa entrypoint and activity matchmaking for single-place games|
+|<img src="./eep-ico.svg" width="96"/>|memorystore-based variable ssa entrypoint, shared instances, and activity matchmaking for single-place games|
 
 ## gotchas
 
