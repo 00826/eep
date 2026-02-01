@@ -1,5 +1,6 @@
 --!strict
 
+local DataStoreService = game:GetService("DataStoreService")
 local HttpService = game:GetService("HttpService")
 local MemoryStoreService = game:GetService("MemoryStoreService")
 local Players = game:GetService("Players")
@@ -193,12 +194,49 @@ local eep = {
 		maxinvites = 4;
 	};
 
+	--- postgame
+	postgame = {
+		--- pseudo-ordereddatastore
+		sortedstore = {
+			key = "eep_sortedpostgame";
+			value = nil :: DataStore?;
+			heartbeat = 2;
+
+			maxvalues = 2^8-1;
+			pull = 100;
+		};
+		--- recent games
+		recentstore = {
+			key = "eep_recentpostgame";
+			value = nil :: MemoryStoreHashMap?;
+			heartbeat = 0;
+			expiry = 48*60*60;
+		};
+
+		--- {string} of scopes that are getasync-ed \
+		--- intended to be set in runtime and populated by activity/time period-unique strings
+		scopes = {} :: {string};
+		--- cache of all scoped postgame values
+		value = {} :: {
+			[string]: {
+				{
+					key: string;
+					value: any;
+					sortvalue: number;
+					timestamp: number;
+				}
+			}
+		};
+	};
+
 	assertions = {
 		nostudioactivity = "activitymap must have a non-nil '__studioactivity' key-value pair";
 		nodefaultactivity = "activitymap must have a non-nil '__defaultactivity' key-value pair";
 		datamodelvalueresolveerror = "error resolving datamodelvalue, will use activitymap __default activity";
 		baddatamodelmemorystore = "datamodel memorystore is nil or not a memorystorehashmap";
 		badsharedinstancememorystore = "sharedinstance memorystore is nil or not a memorystorehashmap";
+		badpostgamesortedstore = "postgame sorted datastore is nil or not a datastore";
+		badpostgamerecentstore = "postgame recent memorystore is nil or not a memorystorehashmap";
 		badpartymemorystore = "party memorystore is nil or not a memorystoresortedmap";
 		badcreatereceiptenvironment = "eep.createreceipt() can only be called on server";
 		badjsonreceipt = "jsonreceipt is not a string";
@@ -298,6 +336,7 @@ function eep.main(
 		eep.sharedinstancestoreheartbeat()
 		eep.datamodelheartbeat()
 		eep.partyheartbeat(activitymap)
+		eep.postgameheartbeat()
 
 		--- placeholder
 		if eep.datamodel.key == "~" then
@@ -351,7 +390,7 @@ function eep.main(
 		eep.activitywrite(activitykey, activitymap[activitykey])
 
 		--- resolve shared instance
-		local sharedinstance, index, peer = nil, nil, nil
+		local sharedinstance = nil
 
 		local sharedinstancesuccess, sharedinstancevalue = eep.sharedinstanceresolve(sharedinstancekey)
 		if sharedinstancesuccess and sharedinstancevalue then
@@ -362,7 +401,7 @@ function eep.main(
 			end
 		end
 		
-		index, peer = eep.sharedinstancefindpeer(sharedinstance, game.PrivateServerId)
+		local index, _ = eep.sharedinstancefindpeer(sharedinstance, game.PrivateServerId)
 		
 		--- reassign sharedinstancekey from shared instance for extra safety
 		sharedinstancekey = sharedinstance.key
@@ -494,40 +533,43 @@ function eep.sharedinstancestoreheartbeat()
 	local sharedinstancestore = eep.sharedinstance.store
 	sharedinstancestore.value = MemoryStoreService:GetHashMap(sharedinstancestore.key)
 	local sharedinstancehashmap = sharedinstancestore.value
-	assert(sharedinstancehashmap and sharedinstancehashmap:IsA("MemoryStoreHashMap"), eep.assertions.badsharedinstancememorystore)
 
-	--- heartbeat
-	local function sharedinstancestoreheartbeat()
-		if eep.activityreadrule("dosharedinstancerefresh") ~= true then return end
+	if sharedinstancehashmap and sharedinstancehashmap:IsA("MemoryStoreHashMap") then
+		--- heartbeat
+		local function sharedinstancestoreheartbeat()
+			if eep.activityreadrule("dosharedinstancerefresh") ~= true then return end
 
-		local unixtimestampmillis = DateTime.now().UnixTimestampMillis
+			local unixtimestampmillis = DateTime.now().UnixTimestampMillis
 
-		local sharedinstancekey = eep.sharedinstance.key
-		if sharedinstancekey == "" then return end
+			local sharedinstancekey = eep.sharedinstance.key
+			if sharedinstancekey == "" then return end
 
-		local updateasyncsuccess, updateasyncresult: typeof(eep.createsharedinstance(nil:: any, nil::any))? = pcall(
-			sharedinstancehashmap.UpdateAsync,
-			sharedinstancehashmap,
-			sharedinstancekey,
-			function(sharedinstance: typeof(eep.createsharedinstance(nil:: any, nil::any))?): (any, number?)
-				if sharedinstance then
-					eep.sharedinstanceresync(sharedinstance, unixtimestampmillis)
+			local updateasyncsuccess, updateasyncresult: typeof(eep.createsharedinstance(nil:: any, nil::any))? = pcall(
+				sharedinstancehashmap.UpdateAsync,
+				sharedinstancehashmap,
+				sharedinstancekey,
+				function(sharedinstance: typeof(eep.createsharedinstance(nil:: any, nil::any))?): (any, number?)
+					if sharedinstance then
+						eep.sharedinstanceresync(sharedinstance, unixtimestampmillis)
 
-					return sharedinstance
-				else
-					return nil
-				end
-			end,
-			eep.sharedinstance.store.expiry
-		)
-		if updateasyncsuccess then
-			
-		else
-			warn(scriptname(), "sharedinstancestore heartbeat updateasync error:", updateasyncresult)
+						return sharedinstance
+					else
+						return nil
+					end
+				end,
+				eep.sharedinstance.store.expiry
+			)
+			if updateasyncsuccess then
+				
+			else
+				warn(scriptname(), "sharedinstancestore heartbeat updateasync error:", updateasyncresult)
+			end
 		end
-	end
 
-	framerule(sharedinstancestore.heartbeat, -1, sharedinstancestoreheartbeat)
+		framerule(sharedinstancestore.heartbeat, -1, sharedinstancestoreheartbeat)
+	else
+		warn(scriptname(), eep.assertions.badsharedinstancememorystore)
+	end
 end
 
 --- creates a shared instance
@@ -804,17 +846,20 @@ function eep.datamodelheartbeat()
 	local datamodelstore = eep.datamodel.store
 	datamodelstore.value = MemoryStoreService:GetHashMap(datamodelstore.key)
 	local datamodelhashmap = datamodelstore.value
-	assert(datamodelhashmap and datamodelhashmap:IsA("MemoryStoreHashMap"), eep.assertions.baddatamodelmemorystore)
 
-	--- see eep.datamodelstore comments
-	--- pattern exists only for consistency
-	--- 
-	--- --- heartbeat
-	--- local function datamodelstoreheartbeat()
-	--- 	
-	--- end
-	--- 
-	--- framerule(datamodelstore.heartbeat, -1, datamodelstoreheartbeat)
+	if datamodelhashmap and datamodelhashmap:IsA("MemoryStoreHashMap") then
+		--- see eep.datamodelstore comments
+		--- pattern exists only for consistency
+		--- 
+		--- --- heartbeat
+		--- local function datamodelstoreheartbeat()
+		--- 	
+		--- end
+		--- 
+		--- framerule(datamodelstore.heartbeat, -1, datamodelstoreheartbeat)
+	else
+		warn(scriptname(), eep.assertions.baddatamodelmemorystore)
+	end
 end
 
 --- creates a datamodelvalue
@@ -866,94 +911,97 @@ function eep.partyheartbeat(activitymap: { __studioactivity: string; __defaultac
 	local partystore = eep.party.store
 	partystore.value = MemoryStoreService:GetSortedMap(partystore.key)
 	local partysortedmap = partystore.value
-	assert(partysortedmap and partysortedmap:IsA("MemoryStoreSortedMap"), eep.assertions.badpartymemorystore)
 
-	--- heartbeat
-	local function partyheartbeat()
-		if eep.activityreadrule("domatchmakingtask") ~= true then return end
-		
-		--- party matchmaking task
-		local tasktype = partystore.tasktype
+	if partysortedmap and partysortedmap:IsA("MemoryStoreSortedMap") then
+		--- heartbeat
+		local function partyheartbeat()
+			if eep.activityreadrule("domatchmakingtask") ~= true then return end
+			
+			--- party matchmaking task
+			local tasktype = partystore.tasktype
 
-		if tasktype == "local" then
-			--- resync from sortedmap
-			eep.partyprestep()
+			if tasktype == "local" then
+				--- resync from sortedmap
+				eep.partyprestep()
 
-			--- teleport
-			eep.partyteleportstep()
+				--- teleport
+				eep.partyteleportstep()
 
-			--- convert to getasyncresult
-			local fakegetasyncresult = {}
-			for _, party in ipairs(eep.party.value) do
-				table.insert(fakegetasyncresult, {
-					key = party.key;
-					sortKey = party.timestamp;
-					value = party;
-				})
-			end
-
-			--- pool local parties, apply matchmaking
-			local pool = eep.createpool(fakegetasyncresult)
-			local receipt = eep.poolallocatestep(pool, activitymap)
-			local partykeyaccesscodemap = eep.poolpopulatestep(receipt)
-			local writeaccesscodesuccess = eep.poolwriteaccesscodestep(partykeyaccesscodemap)
-			if writeaccesscodesuccess then
-				--- ok
-			else
-				warn(scriptname(), "error updateasync-ing parties with reservedserveraccesscode")
-			end
-
-		elseif tasktype == "global" then
-			--- resync from sortedmap
-			eep.partyprestep()
-
-			--- teleport
-			eep.partyteleportstep()
-
-			--- get talking stick
-			local hastalkingstick = eep.talkingstickattemptclaim()
-
-			if hastalkingstick == true then
-				--- getrangeasync pull
-				local getrangeasyncsuccess, getrangeasyncresult: { {
-					key: string;
-					sortKey: number;
-					value: typeof(eep.party.value[1]);
-				} }? = pcall(
-					partysortedmap.GetRangeAsync,
-					partysortedmap,
-					Enum.SortDirection.Ascending,
-					partystore.pull,
-					partystore.exclusivelowerbound
-				)
-				if getrangeasyncsuccess and getrangeasyncresult then
-					--- pool parties, apply matchmaking
-					local pool = eep.createpool(getrangeasyncresult)
-					local receipt = eep.poolallocatestep(pool, activitymap)
-					local partykeyaccesscodemap = eep.poolpopulatestep(receipt)
-					local writeaccesscodesuccess = eep.poolwriteaccesscodestep(partykeyaccesscodemap)
-					if writeaccesscodesuccess then
-						--- ok
-					else
-						warn(scriptname(), "error updateasync-ing parties with reservedserveraccesscode")
-					end
-
-				else
-					warn(scriptname(), "partysortedmap getrangeasync error:", getrangeasyncresult)
+				--- convert to getasyncresult
+				local fakegetasyncresult = {}
+				for _, party in ipairs(eep.party.value) do
+					table.insert(fakegetasyncresult, {
+						key = party.key;
+						sortKey = party.timestamp;
+						value = party;
+					})
 				end
+
+				--- pool local parties, apply matchmaking
+				local pool = eep.createpool(fakegetasyncresult)
+				local receipt = eep.poolallocatestep(pool, activitymap)
+				local partykeyaccesscodemap = eep.poolpopulatestep(receipt)
+				local writeaccesscodesuccess = eep.poolwriteaccesscodestep(partykeyaccesscodemap)
+				if writeaccesscodesuccess then
+					--- ok
+				else
+					warn(scriptname(), "error updateasync-ing parties with reservedserveraccesscode")
+				end
+
+			elseif tasktype == "global" then
+				--- resync from sortedmap
+				eep.partyprestep()
+
+				--- teleport
+				eep.partyteleportstep()
+
+				--- get talking stick
+				local hastalkingstick = eep.talkingstickattemptclaim()
+
+				if hastalkingstick == true then
+					--- getrangeasync pull
+					local getrangeasyncsuccess, getrangeasyncresult: { {
+						key: string;
+						sortKey: number;
+						value: typeof(eep.party.value[1]);
+					} }? = pcall(
+						partysortedmap.GetRangeAsync,
+						partysortedmap,
+						Enum.SortDirection.Ascending,
+						partystore.pull,
+						partystore.exclusivelowerbound
+					)
+					if getrangeasyncsuccess and getrangeasyncresult then
+						--- pool parties, apply matchmaking
+						local pool = eep.createpool(getrangeasyncresult)
+						local receipt = eep.poolallocatestep(pool, activitymap)
+						local partykeyaccesscodemap = eep.poolpopulatestep(receipt)
+						local writeaccesscodesuccess = eep.poolwriteaccesscodestep(partykeyaccesscodemap)
+						if writeaccesscodesuccess then
+							--- ok
+						else
+							warn(scriptname(), "error updateasync-ing parties with reservedserveraccesscode")
+						end
+
+					else
+						warn(scriptname(), "partysortedmap getrangeasync error:", getrangeasyncresult)
+					end
+				else
+					--- datamodel does not have the talking stick ToT
+				end
+
 			else
-				--- datamodel does not have the talking stick ToT
+				--- naur
+				warn(scriptname(), "unknown matchmakingtasktype:", tasktype)
+
+				return
 			end
-
-		else
-			--- naur
-			warn(scriptname(), "unknown matchmakingtasktype:", tasktype)
-
-			return
 		end
+		
+		framerule(partystore.heartbeat, -1, partyheartbeat)
+	else
+		warn(scriptname(), eep.assertions.badpartymemorystore)
 	end
-	
-	framerule(partystore.heartbeat, -1, partyheartbeat)
 end
 
 --- resyncs parties from this datamodel \
@@ -1037,7 +1085,7 @@ function eep.partyteleportstep()
 				local teleportasyncsuccess, teleportasyncresult = pcall(TeleportService.TeleportAsync, TeleportService, game.PlaceId, eep.useridstoplayers(datamodelparty.userids), teleportoptions)
 				if teleportasyncsuccess then
 					--- ok
-					print(scriptname(), string.format("teleporting [%s] to activity %s", table.concat(datamodelparty.userids, ", "), reservedserveraccesscode))
+					--- print(scriptname(), string.format("teleporting [%s] to activity %s", table.concat(datamodelparty.userids, ", "), reservedserveraccesscode))
 				else
 					warn(scriptname(), string.format("partyteleportstep() error: (unable to teleport [%s])", table.concat(datamodelparty.userids, ", ")), teleportasyncresult)
 				end
@@ -1451,6 +1499,163 @@ function eep.createfilteredparty(p: typeof(eep.createparty()))
 		accesscode = p.accesscode ~= "" and "~" or "";
 		timestamp = p.timestamp;
 	}
+end
+
+---                                 $$\                                                 
+---                                 $$ |                                                
+---  $$$$$$\   $$$$$$\   $$$$$$$\ $$$$$$\    $$$$$$\   $$$$$$\  $$$$$$\$$$$\   $$$$$$\  
+--- $$  __$$\ $$  __$$\ $$  _____|\_$$  _|  $$  __$$\  \____$$\ $$  _$$  _$$\ $$  __$$\ 
+--- $$ /  $$ |$$ /  $$ |\$$$$$$\    $$ |    $$ /  $$ | $$$$$$$ |$$ / $$ / $$ |$$$$$$$$ |
+--- $$ |  $$ |$$ |  $$ | \____$$\   $$ |$$\ $$ |  $$ |$$  __$$ |$$ | $$ | $$ |$$   ____|
+--- $$$$$$$  |\$$$$$$  |$$$$$$$  |  \$$$$  |\$$$$$$$ |\$$$$$$$ |$$ | $$ | $$ |\$$$$$$$\ 
+--- $$  ____/  \______/ \_______/    \____/  \____$$ | \_______|\__| \__| \__| \_______|
+--- $$ |                                    $$\   $$ |                                  
+--- $$ |                                    \$$$$$$  |                                  
+--- \__|                                     \______/                                   
+
+--- runs postgame sortedstore/recentstore heartbeat
+function eep.postgameheartbeat()
+	--- postgame datastore
+	local postgamesortedstore = eep.postgame.sortedstore
+	postgamesortedstore.value = DataStoreService:GetDataStore(postgamesortedstore.key)
+	local postgamedatastore = postgamesortedstore.value
+
+	--- postgame recentstore
+	local postgamerecentstore = eep.postgame.recentstore
+	postgamerecentstore.value = MemoryStoreService:GetHashMap(postgamerecentstore.key)
+	
+	if postgamedatastore and postgamedatastore:IsA("DataStore") then
+		--- heartbeat
+		local function postgameheartbeat()
+			if eep.activityreadrule("dopostgamerefresh") ~= true then return end
+
+			--- local unixtimestampmillis = DateTime.now().UnixTimestampMillis
+
+			--- wipe nil scopes
+			for scope in eep.postgame.value do
+				if not table.find(eep.postgame.scopes, scope) then
+					eep.postgame.value[scope] = nil
+				end
+			end
+
+			--- initial pull
+			local result = {}
+			for _, scope in ipairs(eep.postgame.scopes) do
+				local getasyncsuccess, getasyncresult = pcall(postgamedatastore.GetAsync, postgamedatastore, scope)
+				if getasyncsuccess then
+					local truncated = table.create(postgamesortedstore.pull)
+
+					if type(getasyncresult) == "table" then
+						table.move(getasyncresult, 1, postgamesortedstore.pull, #truncated + 1, truncated)
+					end
+
+					result[scope] = truncated
+				else
+					warn(scriptname(), "postgamedatastore getasync error:", getasyncresult)
+				end
+			end
+
+			--- write
+			for scope, values in result do
+				eep.postgame.value[scope] = values
+			end
+
+			--- print(scriptname(), "postgame values:", eep.postgame.value)
+		end
+		
+		framerule(postgamesortedstore.heartbeat, -1, postgameheartbeat)
+	else
+		warn(scriptname(), eep.assertions.badpostgamesortedstore)
+	end
+end
+
+--- creates a postgame value
+function eep.createpostgame(value: any)
+	return {
+		--- postgame key (sharedinstance key)
+		key = "";
+		--- postgame value
+		value = value;
+		--- ascending-order sortvalue
+		sortvalue = 0;
+		--- sortvalue tiebreaker
+		timestamp = DateTime.now().UnixTimestampMillis;
+	}
+end
+
+--- internal table.sort comparison function for sorting `{typeof(eep.createpostgame(...))}`-typed arrays
+function eep.postgamecomp(a: typeof(eep.createpostgame(...)), b: typeof(eep.createpostgame(...)))
+	if a.sortvalue == b.sortvalue then
+		return a.timestamp < b.timestamp
+	else
+		return a.sortvalue < b.sortvalue
+	end
+end
+
+--- publishes postgame to postgame recent memorystore
+function eep.postgamepublishtorecentstore(pg: typeof(eep.createpostgame(...)), scope: string)
+	local postgamerecentstore = eep.postgame.recentstore.value
+	assert(postgamerecentstore and postgamerecentstore:IsA("MemoryStoreHashMap"), eep.assertions.badpostgamerecentstore)
+
+	return pcall(postgamerecentstore.SetAsync, postgamerecentstore, pg.key, pg, eep.postgame.recentstore.expiry)
+end
+
+--- publishes postgame to postgame pseudo-sorted datastore (leaderboard)
+function eep.postgamepublishtosortedstore(pg: typeof(eep.createpostgame(...)), scope: string)
+	local postgamesortedstore = eep.postgame.sortedstore.value
+	assert(postgamesortedstore and postgamesortedstore:IsA("DataStore"), eep.assertions.badpostgamesortedstore)
+
+	local maxvalues = eep.postgame.sortedstore.maxvalues
+
+	local function transform(list: {typeof(eep.createpostgame())}, datastorekeyinfo: DataStoreKeyInfo?)
+		if list then
+			if #list < maxvalues then
+				table.insert(list, pg)
+				table.sort(list, eep.postgamecomp)
+			else
+				--- sort
+				table.sort(list, eep.postgamecomp)
+				--- compare slowest time
+				if list[#list].sortvalue > pg.sortvalue then
+					table.insert(list, pg)
+
+					--- resort and trim
+					table.sort(list, eep.postgamecomp)
+
+					for i = #list, maxvalues + 1, -1 do
+						table.remove(list, i)
+					end
+				end
+			end
+
+			return list
+		else
+			return table.create(1, pg)
+		end
+	end
+
+	return pcall(postgamesortedstore.UpdateAsync, postgamesortedstore, scope, transform)
+end
+
+--- pulls set of keys from postgame recent memorystore
+function eep.postgamepullrecent(keys: {string})
+	local result = table.create(#keys)
+
+	local postgamerecentstore = eep.postgame.recentstore.value
+	assert(postgamerecentstore and postgamerecentstore:IsA("MemoryStoreHashMap"), eep.assertions.badpostgamerecentstore)
+
+	for i, key in ipairs(keys) do
+		local getasyncsuccess, getasyncresult = pcall(postgamerecentstore.GetAsync, postgamerecentstore, key)
+		if getasyncsuccess then
+			if type(getasyncresult) ~= nil then
+				table.insert(result, key)
+			end
+		else
+			warn(scriptname(), "postgame pullrecent error:", getasyncresult)
+		end
+	end
+
+	return result
 end
 
 return eep
