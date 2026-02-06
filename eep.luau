@@ -56,28 +56,26 @@ local eep = {
 	activity = {
 		key = "";
 		value = {  } :: {
-			name: string;
-			desc: string;
-			rules: {
-				--- ## datamodel settings
-				--- what modules will run when `eep.main(...)` is called
-				moduleset: string;
-				--- will this datamodel run the activity matchmaking job (and also run the queue)
-				domatchmakingtask: boolean;
-				--- will this datamodel update itself to its associated shared instance
-				dosharedinstancerefresh: boolean;
+			--- ## datamodel settings
+			--- what modules will run when `eep.main(...)` is called
+			moduleset: string;
+			--- will this datamodel run the activity matchmaking job (and also run the queue)
+			domatchmakingtask: boolean;
+			--- will this datamodel update itself to its associated shared instance
+			dosharedinstancerefresh: boolean;
+			--- will this datamodel pull from postgame sorted/recent stores
+			dopostgamerefresh: boolean;
+			--- on conclusion, will this datamodel publish a developer-prescribed postgame value (read externally)
+			publishpostgame: boolean;
 
-				--- ## activity settings
-				--- can this activity be queued for
-				canqueue: boolean;
-				--- when this activity is queued, how many peers will be created
-				sharedinstancepeers: number;
-				--- how many players will be allocated into each shared instance peer
-				sharedinstanceuseridsperpeer: number;
+			--- ## activity settings
+			--- when this activity is queued, how many peers will be created
+			sharedinstancepeers: number;
+			--- how many players will be allocated into each shared instance peer
+			sharedinstanceuseridsperpeer: number;
 
-				--- ## game-specific rules
-				[string]: any;
-			};
+			--- ## game-specific key-value pairs
+			[string]: any;
 		};
 	};
 	--- datamodelstore is never updated
@@ -435,15 +433,15 @@ function eep.main(
 		eep.sharedinstance.peerindex = receipt.peerindex
 		
 		if loadingscreenprog then
-			pcall(loadingscreenprog, string.format("loading activity '%s'", activitymap[activitykey] and activitymap[activitykey].name or activitykey), 0)
+			pcall(loadingscreenprog, string.format("loading activity '%s'", activitykey), 0)
 		end
 	end
 
 	--- one-time ordered require
 	local activity = eep.activity
-	local rules = activity.value.rules
-	assert(rules, eep.assertions.badactivityrules)
-	local modules = modulesets[rules.moduleset]
+	local moduleset = activity.value.moduleset
+	assert(moduleset, eep.assertions.badactivitymoduleset)
+	local modules = modulesets[moduleset]
 	assert(modules, eep.assertions.badactivitymoduleset)
 
 	--- one time ordered require
@@ -489,7 +487,7 @@ function eep.main(
 		isserver and "server" or "client",
 		elapsed,
 		eep.activity.key,
-		rules.moduleset,
+		moduleset,
 		#modules,
 		eep.sharedinstance.key,
 		eep.sharedinstance.peerindex
@@ -537,7 +535,7 @@ function eep.sharedinstancestoreheartbeat()
 	if sharedinstancehashmap and sharedinstancehashmap:IsA("MemoryStoreHashMap") then
 		--- heartbeat
 		local function sharedinstancestoreheartbeat()
-			if eep.activityreadrule("dosharedinstancerefresh") ~= true then return end
+			if eep.readkey("dosharedinstancerefresh") ~= true then return end
 
 			local unixtimestampmillis = DateTime.now().UnixTimestampMillis
 
@@ -809,10 +807,9 @@ function eep.activitykey()
 	return eep.activity.key
 end
 
---- returns `eep.activity.value.rules[name]`
-function eep.activityreadrule(name: string): any?
-	local rules = eep.activity.value.rules
-	return rules and rules[name] or nil
+--- returns `eep.activity.value[key]`
+function eep.readkey(key: string): any?
+	return eep.activity.value[key] or nil
 end
 
 --- writes key, map pair to: \
@@ -915,7 +912,7 @@ function eep.partyheartbeat(activitymap: { __studioactivity: string; __defaultac
 	if partysortedmap and partysortedmap:IsA("MemoryStoreSortedMap") then
 		--- heartbeat
 		local function partyheartbeat()
-			if eep.activityreadrule("domatchmakingtask") ~= true then return end
+			if eep.readkey("domatchmakingtask") ~= true then return end
 			
 			--- party matchmaking task
 			local tasktype = partystore.tasktype
@@ -1159,8 +1156,8 @@ function eep.poolallocatestep(pool: typeof(eep.createpool(...)), activitymap: { 
 
 		local pop = pool.__pop[activitykey] or 0
 		local a = activitymap[activitykey]
-		local sharedinstancepeers = a.rules.sharedinstancepeers
-		local sharedinstanceuseridsperpeer = a.rules.sharedinstanceuseridsperpeer
+		local sharedinstancepeers = a.sharedinstancepeers
+		local sharedinstanceuseridsperpeer = a.sharedinstanceuseridsperpeer
 		local required = sharedinstancepeers * sharedinstanceuseridsperpeer
 
 		--- pulse check
@@ -1527,7 +1524,7 @@ function eep.postgameheartbeat()
 	if postgamedatastore and postgamedatastore:IsA("DataStore") then
 		--- heartbeat
 		local function postgameheartbeat()
-			if eep.activityreadrule("dopostgamerefresh") ~= true then return end
+			if eep.readkey("dopostgamerefresh") ~= true then return end
 
 			--- local unixtimestampmillis = DateTime.now().UnixTimestampMillis
 
