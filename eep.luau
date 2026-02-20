@@ -25,7 +25,7 @@ local function framerule(step: number, time: number, f: (dt: number, elapsed: nu
 		if step == -1 then
 			return RunService.Heartbeat:Connect(function(dt)
 				f(dt, os.clock() - start)
-			end)
+			end), nil
 		else
 			return RunService.Heartbeat:Connect(function()
 				local now = os.clock()
@@ -35,7 +35,7 @@ local function framerule(step: number, time: number, f: (dt: number, elapsed: nu
 
 					f(dt, now - start)
 				end
-			end)
+			end), nil
 		end
 	else
 		local connection = framerule(step, -1, f, immediate)
@@ -54,7 +54,7 @@ end
 --- timestamps are in `DateTime.now().UnixTimestampMillis`
 local eep = {
 	activity = {
-		key = "";
+		index = -1;
 		value = {  } :: {
 			--- ## datamodel settings
 			--- what modules will run when `eep.main(...)` is called
@@ -110,7 +110,7 @@ local eep = {
 		key = "";
 		value = {} :: {
 			--- activity key for this sharedinstance
-			activitykey: string;
+			activityindex: number;
 
 			--- unique identifier (guid) for this sharedinstance
 			key: string;
@@ -177,8 +177,8 @@ local eep = {
 				userids: {number};
 				--- array of userids that have been invited to this party
 				invites: {number};
-				--- queued activity key
-				activitykey: string;
+				--- queued activity index
+				activityindex: number;
 
 				--- ## memorystore-prescribed
 				--- timestamp of when this party was added to the queue
@@ -237,15 +237,16 @@ local eep = {
 		badpostgamerecentstore = "postgame recent memorystore is nil or not a memorystorehashmap";
 		badpartymemorystore = "party memorystore is nil or not a memorystoresortedmap";
 		badcreatereceiptenvironment = "eep.createreceipt() can only be called on server";
-		badjsonreceipt = "jsonreceipt is not a string";
-		baddecodedjsonreceipt = "decoded jsonreceipt is not a table";
+		badreceipt = "receipt is not a string";
 		badactivityrules = "activity rules are nil or not a table";
 		badactivitymoduleset = "activity moduleset is nil or not a table";
 		badmodulescript = "modulescript in moduleset is not a modulescript";
 	};
 
-	jsonflag = "eep_receipt";
+	receiptflag = "eep_receipt";
 }
+
+export type activitymap = { typeof(eep.activity.value) & {studioactivity: boolean, defaultactivity: boolean} & {[string]: any} }
 
 ---                         $$\             $$$\ $$$\   
 ---                         \__|           $$  _| \$$\  
@@ -261,7 +262,7 @@ local eep = {
 
 --- server/client entrypoint
 function eep.main(
-	activitymap: { __studioactivity: string; __defaultactivity: string; [string]: typeof(eep.activity.value); },
+	activitymap: activitymap,
 	modulesets: { [string]: { ModuleScript }; },
 
 	loadingscreen: ScreenGui?,
@@ -270,9 +271,22 @@ function eep.main(
 )
 	local start = DateTime.now().UnixTimestampMillis
 
-	--- guarantee existence of default activities
-	assert(activitymap[activitymap.__studioactivity], eep.assertions.nostudioactivity)
-	assert(activitymap[activitymap.__defaultactivity], eep.assertions.nodefaultactivity)
+	--- resolve studio/default activities
+	local studioactivityindex = 0
+	local defaultactivityindex = 0
+
+	for index, activitydata in ipairs(activitymap) do
+		if activitydata.studioactivity == true then
+			studioactivityindex = index
+		end
+		if activitydata.defaultactivity == true then
+			defaultactivityindex = index
+		end
+	end
+
+	--- guarantee existence
+	assert(activitymap[studioactivityindex], eep.assertions.nostudioactivity)
+	assert(activitymap[defaultactivityindex], eep.assertions.nodefaultactivity)
 
 	if isserver then
 		--- bindtoclose removeasyncs
@@ -338,54 +352,54 @@ function eep.main(
 
 		--- placeholder
 		if eep.datamodel.key == "~" then
-			local activitykey = activitymap.__defaultactivity
+			local activityindex = defaultactivityindex
 			if isstudio then
-				activitykey = activitymap.__studioactivity
+				activityindex = studioactivityindex
 			end
 
-			local placeholdersharedinstance = eep.createsharedinstance(activitykey, 1)
+			local placeholdersharedinstance = eep.createsharedinstance(activityindex, 1)
 			eep.sharedinstancesetasync(placeholdersharedinstance)
 
 			local datamodelhashmap = eep.datamodel.store.value
 			if datamodelhashmap and datamodelhashmap:IsA("MemoryStoreHashMap") then
 				datamodelhashmap:SetAsync(
 					eep.datamodel.key,
-					eep.createdatamodelvalue(activitykey, placeholdersharedinstance.key),
+					eep.createdatamodelvalue(activityindex, placeholdersharedinstance.key),
 					eep.datamodel.store.expiry
 				)
 			end
 			
-			print(scriptname(), "using placeholder sharedinstance:", placeholdersharedinstance)
+			--- print(scriptname(), "using placeholder sharedinstance:", placeholdersharedinstance)
 		end
 
 		--- keys
-		local activitykey = activitymap.__defaultactivity
+		local activityindex = defaultactivityindex
 		local sharedinstancekey = ""
 
 		--- resolve datamodel value, write to this table
 		local datamodelsuccess, datamodelvalue = eep.datamodelresolve()
 
 		if datamodelsuccess and datamodelvalue then
-			activitykey = datamodelvalue.activitykey
+			activityindex = datamodelvalue.activityindex
 			sharedinstancekey = datamodelvalue.sharedinstancekey
 
 		elseif isstudio then
-			activitykey = activitymap.__studioactivity
+			activityindex = studioactivityindex
 			sharedinstancekey = ""
 
 		elseif game.PrivateServerId == "" then
-			activitykey = activitymap.__defaultactivity
+			activityindex = defaultactivityindex
 			sharedinstancekey = ""
 
 		else
 			warn(scriptname(), "eep.datamodelresolve() error", datamodelvalue, "default activity will be used")
 
-			activitykey = activitymap.__defaultactivity
+			activityindex = defaultactivityindex
 			sharedinstancekey = ""
 
 		end
 
-		eep.activitywrite(activitykey, activitymap[activitykey])
+		eep.activitywrite(activityindex, activitymap[defaultactivityindex])
 
 		--- resolve shared instance
 		local sharedinstance = nil
@@ -398,42 +412,43 @@ function eep.main(
 				warn(scriptname(), "sharedinstanceresolve() error:", sharedinstancevalue)
 			end
 		end
-		
-		local index, _ = eep.sharedinstancefindpeer(sharedinstance, game.PrivateServerId)
-		
-		--- reassign sharedinstancekey from shared instance for extra safety
-		sharedinstancekey = sharedinstance.key
-		eep.sharedinstance.key = sharedinstancekey
-		eep.sharedinstance.peerindex = index or -1
-		
-		eep.sharedinstanceresync(sharedinstance, sharedinstance.timestamp)
+
+		if sharedinstance then
+			local index, _ = eep.sharedinstancefindpeer(sharedinstance, game.PrivateServerId)
+			
+			--- reassign sharedinstancekey from shared instance for extra safety
+			sharedinstancekey = sharedinstance.key
+			eep.sharedinstance.key = sharedinstancekey
+			eep.sharedinstance.peerindex = index or -1
+			
+			eep.sharedinstanceresync(sharedinstance, sharedinstance.timestamp)
+		end
 	else
 		if loadingscreenprog then
 			pcall(loadingscreenprog, "waiting for server...", 0)
 		end
 
-		--- wait for jsonreceipt to be set
-		local jsonreceipt = script:GetAttribute(eep.jsonflag)
-		if type(jsonreceipt) ~= "string" then
+		--- wait for receipt to be set
+		local r = script:GetAttribute(eep.receiptflag)
+		if type(r) ~= "string" then
 			repeat
 				task.wait()
-				jsonreceipt = script:GetAttribute(eep.jsonflag)
-			until type(jsonreceipt) == "string"
+				r = script:GetAttribute(eep.receiptflag)
+			until type(r) == "string"
 		end
-		assert(type(jsonreceipt) == "string", eep.assertions.badjsonreceipt)
+		assert(type(r) == "string", eep.assertions.badreceipt)
 
-		local receipt: typeof(eep.createreceipt())? = HttpService:JSONDecode(jsonreceipt)
-		assert(type(receipt) == "table", eep.assertions.baddecodedjsonreceipt)
+		local receipt = eep.receiptread(r)
 		
-		--- write activitykey, sharedinstance key, sharedinstance peer index
-		local activitykey = receipt.activitykey
-		eep.activitywrite(activitykey, activitymap[activitykey])
+		--- write activityindex, sharedinstance key, sharedinstance peer index
+		local activityindex = receipt.activityindex
+		eep.activitywrite(activityindex, activitymap[activityindex])
 		
 		eep.sharedinstance.key = receipt.sharedinstancekey
 		eep.sharedinstance.peerindex = receipt.peerindex
 		
 		if loadingscreenprog then
-			pcall(loadingscreenprog, string.format("loading activity '%s'", activitykey), 0)
+			pcall(loadingscreenprog, string.format("loading activity '%d'", activityindex), 0)
 		end
 	end
 
@@ -460,8 +475,8 @@ function eep.main(
 		local requiresuccess, module = pcall(require, modulescript)
 		if requiresuccess then
 			if type(module) == "table" then
-				if module.init and type(module.init) == "function" then
-					local initsuccess, initresult = pcall(module.init)
+				if type(module.init) == "function" then
+					local initsuccess, initresult = pcall(module.init::any)
 					if initsuccess then
 						--- ok
 					else
@@ -474,24 +489,26 @@ function eep.main(
 		end
 	end
 
-	--- script attribute json receipt after all modules loaded
+	--- script attribute receipt after all modules loaded
 	if isserver then
-		local receipt = eep.createreceipt()
-		script:SetAttribute(eep.jsonflag, HttpService:JSONEncode(receipt))
+		local r = eep.createreceipt()
+		assert(string.len(r) <= 50, "string exceeds 50-character workspace.NextGenerationReplication attribute limit")
+		
+		script:SetAttribute(eep.receiptflag, r)
 	end
 
 	--- conclude
 	local elapsed = DateTime.now().UnixTimestampMillis - start
 	print(scriptname(), string.format(
-		"eep.main() (%s)\ntime: %dms\nactivitykey: '%s'\nmoduleset: '%s' (%d)\nsharedinstancekey: '%s'\npeer index: %d",
+		"eep.main() (%s)\ntime: %dms\nactivityindex: '%d'\nmoduleset: '%s' (%d)\nsharedinstancekey: '%s'\npeer index: %d\n",
 		isserver and "server" or "client",
 		elapsed,
-		eep.activity.key,
+		eep.activity.index,
 		moduleset,
 		#modules,
 		eep.sharedinstance.key,
 		eep.sharedinstance.peerindex
-	))
+	), "sharedinstance:", eep.sharedinstance.value)
 	
 	--- remove loading screen
 	if loadingscreendestroy then
@@ -505,10 +522,22 @@ end
 function eep.createreceipt()
 	assert(isserver, eep.assertions.badcreatereceiptenvironment)
 
+	return string.format(
+		"%d!%d!%s",
+		eep.sharedinstance.peerindex,
+		eep.activity.index,
+		eep.sharedinstance.key
+	)
+end
+
+--- returns table representation of `eep.createreceipt()`
+function eep.receiptread(r: string)
+	local split = string.split(r, "!")
+
 	return {
-		peerindex = eep.sharedinstance.peerindex;
-		activitykey = eep.activity.key;
-		sharedinstancekey = eep.sharedinstance.key;
+		peerindex = tonumber(split[1])::number;
+		activityindex = tonumber(split[2])::number;
+		sharedinstancekey = split[3];
 	}
 end
 
@@ -571,10 +600,10 @@ function eep.sharedinstancestoreheartbeat()
 end
 
 --- creates a shared instance
-function eep.createsharedinstance(activitykey: string, peers: number)
+function eep.createsharedinstance(activityindex: number, peers: number)
 	local value = {
 		--- activity key for this sharedinstance
-		activitykey = activitykey;
+		activityindex = activityindex;
 
 		--- unique identifier (guid) for this sharedinstance
 		key = HttpService:GenerateGUID(false);
@@ -595,15 +624,15 @@ function eep.createsharedinstance(activitykey: string, peers: number)
 			--- index of this peer relative to the sharedinstance
 			index = i;
 			--- variable read-write table for game-specific code
-			value = {  };
+			value = {  } :: {[any]: any};
 			--- last time this peer was resynced
 			timestamp = -1;
 
 			--- userids allocated to this peer
-			expectinguserids = {  };
+			expectinguserids = {  } :: {number};
 			--- party keys associated with this peer
 			--- (technically they get dissolved when teleported but exists for posterity)
-			partykeys = {  };
+			partykeys = {  } :: {string};
 
 			--- reservedserver accesscode
 			accesscode = "";
@@ -630,8 +659,9 @@ function eep.sharedinstanceresync(si: typeof(eep.createsharedinstance(...)), uni
 	end
 
 	--- write all key-value pairs to sharedinstance value
-	for k, v in si do
-		eep.sharedinstance.value[k] = v
+	local datamodelsharedinstancevalue = eep.sharedinstance.value
+	for k, v in pairs(si::any) do
+		(datamodelsharedinstancevalue::any)[k] = v
 	end
 
 	return si
@@ -727,8 +757,12 @@ function eep.sharedinstancereserveservers(si: typeof(eep.createsharedinstance(..
 			accesscode, privateserverid = TeleportService:ReserveServerAsync(game.PlaceId)
 		end
 
-		peer.accesscode = accesscode
-		peer.privateserverid = privateserverid
+		if accesscode and privateserverid then
+			peer.accesscode = accesscode
+			peer.privateserverid = privateserverid
+		else
+			warn(scriptname(), "accesscode and/or privateserverid are nil")
+		end
 	end
 end
 
@@ -743,7 +777,7 @@ function eep.sharedinstancesetasync(si: typeof(eep.createsharedinstance(...)))
 	--- setasync peers
 	for index, peer in ipairs(si.peers) do
 		local datamodelkey = eep.datamodelkey(peer.privateserverid)
-		local datamodelvalue = eep.createdatamodelvalue(si.activitykey, si.key)
+		local datamodelvalue = eep.createdatamodelvalue(si.activityindex, si.key)
 
 		local setasyncsuccess, setasyncresult = pcall(datamodelhashmap.SetAsync, datamodelhashmap, datamodelkey, datamodelvalue, eep.datamodel.store.expiry)
 		if setasyncsuccess then
@@ -802,9 +836,9 @@ end
 ---                                                            \$$$$$$  |
 ---                                                             \______/ 
 
---- returns `eep.activity.key`
-function eep.activitykey()
-	return eep.activity.key
+--- returns `eep.activity.index`
+function eep.activityindex()
+	return eep.activity.index
 end
 
 --- returns `eep.activity.value[key]`
@@ -813,11 +847,11 @@ function eep.readkey(key: string): any?
 end
 
 --- writes key, map pair to: \
---- `eep.activity.key = key` \
+--- `eep.activity.index = key` \
 --- `eep.activity.value = value`
-function eep.activitywrite(key: string, value: typeof(eep.activity.value))
+function eep.activitywrite(index: number, value: index<activitymap, number>)
 	local activity = eep.activity
-	activity.key = key
+	activity.index = index
 	activity.value = value
 
 	return activity
@@ -860,9 +894,9 @@ function eep.datamodelheartbeat()
 end
 
 --- creates a datamodelvalue
-function eep.createdatamodelvalue(activitykey: string, sharedinstancekey: string)
+function eep.createdatamodelvalue(activityindex: number, sharedinstancekey: string)
 	return {
-		activitykey = activitykey;
+		activityindex = activityindex;
 		sharedinstancekey = sharedinstancekey;
 	}
 end
@@ -903,7 +937,7 @@ end
 --- \__|                                    \______/ 
 
 --- runs matchmakingtask heartbeat \
-function eep.partyheartbeat(activitymap: { __studioactivity: string; __defaultactivity: string; [string]: typeof(eep.activity.value); })
+function eep.partyheartbeat(activitymap: activitymap)
 	--- datamodelvalue memorystore
 	local partystore = eep.party.store
 	partystore.value = MemoryStoreService:GetSortedMap(partystore.key)
@@ -1022,7 +1056,7 @@ function eep.partyprestep()
 					--- write from datamodel party to memorystore party
 					p.userids = datamodelparty.userids
 					p.invites = datamodelparty.invites
-					p.activitykey = datamodelparty.activitykey
+					p.activityindex = datamodelparty.activityindex
 				else
 					p = datamodelparty
 				end
@@ -1033,7 +1067,7 @@ function eep.partyprestep()
 				if p.accesscode ~= "" then
 					--- was assigned activity
 					p.timestamp = -1
-				elseif p.activitykey == "" then
+				elseif p.activityindex == -1 then
 					--- not queued for anything
 					p.timestamp = -1
 				elseif #p.userids <= 0 then
@@ -1098,16 +1132,17 @@ function eep.createpool(getrangeasyncresult: {{
 	sortKey: number;
 	value: typeof(eep.party.value[1]);
 }})
-	local pool = {
-		--- population `{[string activitykey]: number # userids queued}`
-		__pop = {};
-	}
+	local t = {}::{{
+		activityindex: number;
+		parties: { { key: string, userids: {number} } };
+		population: number;
+	}};
 
 	for i, v in ipairs(getrangeasyncresult) do
 		local party = v.value
-		--- do not consider if empty activitykey
-		local activitykey = party.activitykey
-		if activitykey == "" then continue end
+		--- do not consider if empty activityindex
+		local activityindex = party.activityindex
+		if activityindex == -1 then continue end
 
 		--- do not consider if already has accesscode
 		local accesscode = party.accesscode
@@ -1117,18 +1152,34 @@ function eep.createpool(getrangeasyncresult: {{
 		local timestamp = party.timestamp
 		if timestamp == -1 then continue end
 
-		if not pool[activitykey] then
-			pool[activitykey] = table.create(eep.party.store.pull)
+		--- lf preexisting
+		local createnew = true
+		for _, pool in t do
+			if pool.activityindex == activityindex then
+				createnew = false
+				break
+			end
 		end
-		if not pool.__pop[activitykey] then
-			pool.__pop[activitykey] = 0
+		if createnew == true then
+			table.insert(t, {
+				activityindex = activityindex;
+				parties = {}::{ { key: string, userids: {number} } };
+				population = 0;
+			})
 		end
 
-		table.insert(pool[activitykey], { key = party.key; userids = party.userids; })
-		pool.__pop[activitykey] += #party.userids
+		--- insert
+		for _, pool in t do
+			if pool.activityindex == activityindex then
+				table.insert(pool.parties, { key = party.key; userids = party.userids; })
+				pool.population += #party.userids
+
+				break
+			end
+		end
 	end
 
-	return pool
+	return t
 end
 
 --- check if party still exists \
@@ -1137,7 +1188,7 @@ end
 --- allocate userids to sharedinstance peers \
 --- updateasync relevant parties with sharedinstance peer accesscode \
 --- returns `{ typeof(eep.createsharedinstance(...)) }`
-function eep.poolallocatestep(pool: typeof(eep.createpool(...)), activitymap: { __studioactivity: string; __defaultactivity: string; [string]: typeof(eep.activity.value); })
+function eep.poolallocatestep(pool: typeof(eep.createpool(...)), activitymap: activitymap)
 	local partysortedmap = eep.party.store.value
 	assert(partysortedmap and partysortedmap:IsA("MemoryStoreSortedMap"), eep.assertions.badpartymemorystore)
 
@@ -1151,29 +1202,30 @@ function eep.poolallocatestep(pool: typeof(eep.createpool(...)), activitymap: { 
 
 	local receipt = {}
 
-	for activitykey, entries in pool do
-		if activitykey == "__pop" then continue end
+	for _, activityentry in pairs(pool) do
+		local activityindex = activityentry.activityindex
+		local population = activityentry.population
+		local parties = activityentry.parties
 
-		local pop = pool.__pop[activitykey] or 0
-		local a = activitymap[activitykey]
-		local sharedinstancepeers = a.sharedinstancepeers
-		local sharedinstanceuseridsperpeer = a.sharedinstanceuseridsperpeer
+		local activitydata = activitymap[activityindex]
+		local sharedinstancepeers = activitydata.sharedinstancepeers
+		local sharedinstanceuseridsperpeer = activitydata.sharedinstanceuseridsperpeer
 		local required = sharedinstancepeers * sharedinstanceuseridsperpeer
 
 		--- pulse check
-		for i = #entries, 1, -1 do
-			local entry = entries[i]
+		for i = #parties, 1, -1 do
+			local party = parties[i]
 
 			local getasyncsuccess, p: typeof(eep.createparty())? = pcall(
 				partysortedmap.GetAsync,
 				partysortedmap,
-				entry.key
+				party.key
 			)
 
 			local remove = false
 			if getasyncsuccess and p then
 				remove = p.accesscode ~= "" or --- was assigned activity
-						p.activitykey == "" or --- not queued for anything
+						p.activityindex == -1 or --- not queued for anything
 						#p.userids <= 0 or --- empty party
 						p.timestamp == -1 or --- dequeued
 						false
@@ -1186,29 +1238,29 @@ function eep.poolallocatestep(pool: typeof(eep.createpool(...)), activitymap: { 
 			end
 
 			if remove == true then
-				pop -= #entry.userids
+				population -= #party.userids
 
-				table.remove(entries, i)
+				table.remove(parties, i)
 			end
 		end
 
-		if pop < required then continue end
+		if population < required then continue end
 
 		--- allocate
-		local sharedinstance = eep.createsharedinstance(activitykey, sharedinstancepeers)
+		local sharedinstance = eep.createsharedinstance(activityindex, sharedinstancepeers)
 		for peerindex = 1, sharedinstancepeers do
-			local userids = table.create(sharedinstanceuseridsperpeer);
-			local partykeys = table.create(sharedinstanceuseridsperpeer);
+			local userids = table.create(sharedinstanceuseridsperpeer) :: {number}
+			local partykeys = table.create(sharedinstanceuseridsperpeer) :: {string}
 
-			local toremove = table.create(sharedinstanceuseridsperpeer)
+			local toremove = table.create(sharedinstanceuseridsperpeer) :: {number}
 
-			for i, entry in ipairs(entries) do
+			for i, party in ipairs(parties) do
 				--- if userids can fit into this peer,
 				--- allocate userids
 				--- insert party key for later sending accesscode
-				if #userids + #entry.userids <= sharedinstanceuseridsperpeer then
-					table.move(entry.userids, 1, #entry.userids, #userids + 1, userids)
-					table.insert(partykeys, entry.key)
+				if #userids + #party.userids <= sharedinstanceuseridsperpeer then
+					table.move(party.userids, 1, #party.userids, #userids + 1, userids)
+					table.insert(partykeys::any, party.key::any)
 
 					table.insert(toremove, i)
 
@@ -1219,7 +1271,7 @@ function eep.poolallocatestep(pool: typeof(eep.createpool(...)), activitymap: { 
 			end
 
 			for i = #toremove, 1, -1 do
-				table.remove(entries, toremove[i])
+				table.remove(parties, toremove[i])
 			end
 
 			--- insert if and only if exactly enough userids were allocated
@@ -1247,10 +1299,10 @@ function eep.poolpopulatestep(sharedinstances: { typeof(eep.createsharedinstance
 	local result = {}
 
 	for i, sharedinstance in ipairs(sharedinstances) do
-		eep.sharedinstancereserveservers(sharedinstance)
-		local setasyncsuccess = eep.sharedinstancesetasync(sharedinstance)
+		eep.sharedinstancereserveservers(sharedinstance::any)
+		local setasyncsuccess = eep.sharedinstancesetasync(sharedinstance::any)
 		if setasyncsuccess then
-			local accesscodemap = eep.sharedinstanceresolveaccesscodemap(sharedinstance)
+			local accesscodemap = eep.sharedinstanceresolveaccesscodemap(sharedinstance::any)
 
 			for partykey, reservedserveraccesscode in accesscodemap do
 				result[partykey] = reservedserveraccesscode
@@ -1343,7 +1395,7 @@ end
 
 --- converts userids to player instances
 function eep.useridstoplayers(userids: {number})
-	local result = table.create(#userids)
+	local result = table.create(#userids) :: {Player}
 
 	for _, userid in ipairs(userids) do
 		local player = Players:GetPlayerByUserId(userid)
@@ -1361,9 +1413,9 @@ function eep.createparty(): typeof(eep.party.value[1])
 	return {
 		key = HttpService:GenerateGUID(false);
 
-		userids = table.create(Players.MaxPlayers);
-		invites = table.create(Players.MaxPlayers);
-		activitykey = "";
+		userids = table.create(Players.MaxPlayers) :: { number };
+		invites = table.create(Players.MaxPlayers) :: { number };
+		activityindex = -1;
 
 		timestamp = -1;
 		accesscode = "";
@@ -1492,7 +1544,7 @@ function eep.createfilteredparty(p: typeof(eep.createparty()))
 		key = p.key;
 		userids = p.userids;
 		invites = p.invites;
-		activitykey = p.activitykey;
+		activityindex = p.activityindex;
 		accesscode = p.accesscode ~= "" and "~" or "";
 		timestamp = p.timestamp;
 	}
@@ -1538,7 +1590,7 @@ function eep.postgameheartbeat()
 			--- initial pull
 			local result = {}
 			for _, scope in ipairs(eep.postgame.scopes) do
-				local getasyncsuccess, getasyncresult = pcall(postgamedatastore.GetAsync, postgamedatastore, scope)
+				local getasyncsuccess, getasyncresult = pcall(postgamedatastore.GetAsync, postgamedatastore, scope, nil)
 				if getasyncsuccess then
 					local truncated = table.create(postgamesortedstore.pull)
 
