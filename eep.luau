@@ -159,7 +159,7 @@ local eep = {
 			pull = 200;
 			exclusivelowerbound = { sortKey = 0; };
 
-			tasktype = "global" ::
+			tasktype = "local" ::
 				| "local" --- matchmaking step contained to this server
 				| "global"; --- matchmaking step contained to partystore
 			
@@ -192,13 +192,42 @@ local eep = {
 		maxinvites = 4;
 	};
 
+	--- global leaderboards
+	leaderboards = {
+		--- pseudo-ordereddatastore
+		sortedstore = {
+			key = "eep_sortedleaderboards";
+			value = nil :: DataStore?;
+			heartbeat = 120;
+
+			maxvalues = 2^8-1;
+			pull = 100;
+
+			timestampid = "";
+		};
+		queue = {} :: {
+			{ timestampid: string; scope: string; key: any; value: any; sortvalue: number; }
+		};
+
+		--- { [string scope]: { { key: any; value: any; sortvalue: number } } }
+		value = {} :: {
+			[string]: {
+				{
+					key: any;
+					value: any;
+					sortvalue: number;
+				}
+			}
+		}
+	};
+
 	--- postgame
 	postgame = {
 		--- pseudo-ordereddatastore
 		sortedstore = {
 			key = "eep_sortedpostgame";
 			value = nil :: DataStore?;
-			heartbeat = 2;
+			heartbeat = 120;
 
 			maxvalues = 2^8-1;
 			pull = 100;
@@ -233,6 +262,7 @@ local eep = {
 		datamodelvalueresolveerror = "error resolving datamodelvalue, will use activitymap __default activity";
 		baddatamodelmemorystore = "datamodel memorystore is nil or not a memorystorehashmap";
 		badsharedinstancememorystore = "sharedinstance memorystore is nil or not a memorystorehashmap";
+		badleaderboardsortedstore = "leaderboard sorted datastore is nil or not a datastore";
 		badpostgamesortedstore = "postgame sorted datastore is nil or not a datastore";
 		badpostgamerecentstore = "postgame recent memorystore is nil or not a memorystorehashmap";
 		badpartymemorystore = "party memorystore is nil or not a memorystoresortedmap";
@@ -244,6 +274,7 @@ local eep = {
 	};
 
 	receiptflag = "eep_receipt";
+	receiptstring = "";
 }
 
 export type activitymap = { typeof(eep.activity.value) & {studioactivity: boolean, defaultactivity: boolean} & {[string]: any} }
@@ -348,6 +379,7 @@ function eep.main(
 		eep.sharedinstancestoreheartbeat()
 		eep.datamodelheartbeat()
 		eep.partyheartbeat(activitymap)
+		eep.leaderboardheartbeat()
 		eep.postgameheartbeat()
 
 		--- placeholder
@@ -399,7 +431,7 @@ function eep.main(
 
 		end
 
-		eep.activitywrite(activityindex, activitymap[defaultactivityindex])
+		eep.activitywrite(activityindex, activitymap[activityindex])
 
 		--- resolve shared instance
 		local sharedinstance = nil
@@ -437,6 +469,7 @@ function eep.main(
 			until type(r) == "string"
 		end
 		assert(type(r) == "string", eep.assertions.badreceipt)
+		eep.receiptstring = r
 
 		local receipt = eep.receiptread(r)
 		
@@ -495,19 +528,18 @@ function eep.main(
 		assert(string.len(r) <= 50, "string exceeds 50-character workspace.NextGenerationReplication attribute limit")
 		
 		script:SetAttribute(eep.receiptflag, r)
+		eep.receiptstring = r
 	end
 
 	--- conclude
 	local elapsed = DateTime.now().UnixTimestampMillis - start
 	print(scriptname(), string.format(
-		"eep.main() (%s)\ntime: %dms\nactivityindex: '%d'\nmoduleset: '%s' (%d)\nsharedinstancekey: '%s'\npeer index: %d\n",
+		"eep.main() (%s)\ntime: %dms\nmoduleset: '%s' (%d)\nreceipt: %s\n",
 		isserver and "server" or "client",
 		elapsed,
-		eep.activity.index,
 		moduleset,
 		#modules,
-		eep.sharedinstance.key,
-		eep.sharedinstance.peerindex
+		eep.createreceipt()
 	), "sharedinstance:", eep.sharedinstance.value)
 	
 	--- remove loading screen
@@ -520,8 +552,6 @@ end
 
 --- creates a minimal client-exposable receipt for running eep.main()
 function eep.createreceipt()
-	assert(isserver, eep.assertions.badcreatereceiptenvironment)
-
 	return string.format(
 		"%d!%d!%s",
 		eep.sharedinstance.peerindex,
@@ -539,6 +569,14 @@ function eep.receiptread(r: string)
 		activityindex = tonumber(split[2])::number;
 		sharedinstancekey = split[3];
 	}
+end
+
+--- teleports players to `game.PlaceId`
+function eep.teleporttopublicserver(players: {Player})
+	assert(isserver, string.format("%s cannot teleport if calling environment is not server", scriptname()))
+	assert(isstudio == false, string.format("%s cannot teleport if calling environment is in studio", scriptname()))
+
+	return pcall(TeleportService.TeleportAsync, TeleportService, game.PlaceId, players, nil)
 end
 
 ---           $$\                                           $$\ $$\                       $$\                                             
@@ -1100,7 +1138,6 @@ function eep.partyprestep()
 	return DateTime.now().UnixTimestampMillis - unixtimestampmillis
 end
 
-
 function eep.partyteleportstep()
 	for _, datamodelparty in ipairs(eep.party.value) do
 		local reservedserveraccesscode = datamodelparty.accesscode
@@ -1108,7 +1145,7 @@ function eep.partyteleportstep()
 		if reservedserveraccesscode ~= "" then
 
 			if isstudio then
-				--- print("not teleporting (studio)")
+				print("not teleporting (studio)")
 			else
 				local teleportoptions = Instance.new("TeleportOptions")
 				teleportoptions.ReservedServerAccessCode = reservedserveraccesscode
@@ -1548,6 +1585,177 @@ function eep.createfilteredparty(p: typeof(eep.createparty()))
 		accesscode = p.accesscode ~= "" and "~" or "";
 		timestamp = p.timestamp;
 	}
+end
+
+--- $$\                           $$\                     $$\                                           $$\           
+--- $$ |                          $$ |                    $$ |                                          $$ |          
+--- $$ | $$$$$$\   $$$$$$\   $$$$$$$ | $$$$$$\   $$$$$$\  $$$$$$$\   $$$$$$\   $$$$$$\   $$$$$$\   $$$$$$$ | $$$$$$$\ 
+--- $$ |$$  __$$\  \____$$\ $$  __$$ |$$  __$$\ $$  __$$\ $$  __$$\ $$  __$$\  \____$$\ $$  __$$\ $$  __$$ |$$  _____|
+--- $$ |$$$$$$$$ | $$$$$$$ |$$ /  $$ |$$$$$$$$ |$$ |  \__|$$ |  $$ |$$ /  $$ | $$$$$$$ |$$ |  \__|$$ /  $$ |\$$$$$$\  
+--- $$ |$$   ____|$$  __$$ |$$ |  $$ |$$   ____|$$ |      $$ |  $$ |$$ |  $$ |$$  __$$ |$$ |      $$ |  $$ | \____$$\ 
+--- $$ |\$$$$$$$\ \$$$$$$$ |\$$$$$$$ |\$$$$$$$\ $$ |      $$$$$$$  |\$$$$$$  |\$$$$$$$ |$$ |      \$$$$$$$ |$$$$$$$  |
+--- \__| \_______| \_______| \_______| \_______|\__|      \_______/  \______/  \_______|\__|       \_______|\_______/ 
+---                                                                                                                   
+---                                                                                                                   
+---                                                                                                                   
+--- runs leaderboard heartbeat
+function eep.leaderboardheartbeat()
+	--- leaderboard datastore
+	local leaderboardsortedstore = eep.leaderboards.sortedstore
+	leaderboardsortedstore.value = DataStoreService:GetDataStore(leaderboardsortedstore.key)
+	local leaderboarddatastore = leaderboardsortedstore.value
+	
+	if leaderboarddatastore and leaderboarddatastore:IsA("DataStore") then
+		--- heartbeat
+		local function leaderboardheartbeat()
+			if eep.readkey("doleaderboardrefresh") ~= true then return end
+
+			if #eep.leaderboards.queue > 0 then
+				eep.leaderboardpublishtosortedstore(eep.leaderboards.queue)
+			end
+
+			local pullsuccess, pullresult = eep.leaderboardpull()
+			if pullsuccess then
+				--- ok
+				print(pullsuccess, pullresult)
+			else
+				warn(scriptname(), "leaderboard pull error:", pullresult)
+			end
+		end
+		
+		framerule(leaderboardsortedstore.heartbeat, -1, leaderboardheartbeat)
+	else
+		warn(scriptname(), eep.assertions.badpostgamesortedstore)
+	end
+end
+
+--- creates an empty leaderboard entry \
+--- default timestampid is `"global"`
+function eep.createleaderboardentry()
+	return { timestampid = "global"; scope = "all"; key = nil::any; value = nil::any; sortvalue = -1; }
+end
+
+--- pulls leaderboards
+function eep.leaderboardpull()
+	local leaderboardsortedstore = eep.leaderboards.sortedstore
+	leaderboardsortedstore.value = DataStoreService:GetDataStore(leaderboardsortedstore.key)
+	local leaderboarddatastore = leaderboardsortedstore.value
+	assert(leaderboarddatastore and leaderboarddatastore:IsA("DataStore"), eep.assertions.badleaderboardsortedstore)
+
+	local leaderboardtimestampid = leaderboardsortedstore.timestampid
+	if leaderboardtimestampid == "" then
+		return false, nil
+	end
+
+	local result = {}
+	local getasyncsuccess, getasyncresult = pcall(leaderboarddatastore.GetAsync, leaderboarddatastore, leaderboardtimestampid, nil)
+	if getasyncsuccess then
+		if type(getasyncresult) == "table" then
+			for k, v in getasyncresult do
+				local truncated = table.create(leaderboardsortedstore.pull)
+				table.move(v, 1, leaderboardsortedstore.pull, #truncated + 1, truncated)
+
+				result[k] = truncated
+			end
+		end
+	end
+
+	for k, t in result do
+		eep.leaderboards.value[k] = t
+	end
+
+	return getasyncsuccess, getasyncresult
+end
+
+function eep.leaderboardcomp(a: typeof(eep.createleaderboardentry()), b: typeof(eep.createleaderboardentry()))
+	return a.sortvalue > b.sortvalue
+end
+
+--- flushes queued leaderboard entries \
+--- sortvalues of -1 (default of `eep.createleaderboardentry()`) are disregarded
+function eep.leaderboardpublishtosortedstore(queue: {typeof(eep.createleaderboardentry())})
+	local leaderboardsortedstore = eep.leaderboards.sortedstore
+	local leaderboarddatastore = leaderboardsortedstore.value
+	assert(leaderboarddatastore and leaderboarddatastore:IsA("DataStore"), eep.assertions.badleaderboardsortedstore)
+
+	local leaderboardtimestampid = leaderboardsortedstore.timestampid
+	if leaderboardtimestampid == "" then
+		return false, nil
+	end
+
+	local maxvalues = eep.leaderboards.sortedstore.maxvalues
+
+	--- convert queue into updateasync-able table
+	local t = {}
+	for i, v in ipairs(eep.leaderboards.queue) do
+		local thistimestampid = v.timestampid
+		if thistimestampid ~= leaderboardtimestampid then continue end
+
+		table.insert(t, v)
+	end
+
+	table.clear(eep.leaderboards.queue)
+
+	local function transform(timestampedleaderboard: {[string]: {typeof(eep.createleaderboardentry())}}?, datastorekeyinfo: DataStoreKeyInfo?)
+		if not timestampedleaderboard then
+			timestampedleaderboard = {}
+		end
+		assert(timestampedleaderboard) --- ?
+
+		for _, entry in ipairs(t::{typeof(eep.createleaderboardentry())}) do
+			if entry.sortvalue == -1 then continue end
+
+			local scope = entry.scope
+			if scope == nil then continue end
+
+			--- nil irrelevant values (already scoped)
+			entry.timestampid = nil::any
+			entry.scope = nil::any
+
+			--- make scoped table if doesnt exist yet
+			if not timestampedleaderboard[scope] then
+				timestampedleaderboard[scope] = {}
+			end
+
+			--- add (if doesnt exist) or update (if preexisting value with key exists)
+			local scopetable = timestampedleaderboard[scope]
+			local preexistingupdated = false
+			for _, preexisting in scopetable do
+				if preexisting.key == entry.key then
+					preexistingupdated = true
+
+					--- copy over relevant info
+					preexisting.key = entry.key
+					preexisting.value = entry.value
+					preexisting.sortvalue = entry.sortvalue
+
+					break
+				end
+			end
+
+			if preexistingupdated then
+				--- do nothing
+			else
+				--- insert
+				table.insert(scopetable, entry)
+			end
+		end
+
+		assert(timestampedleaderboard) --- ?
+		for _, scopetable in timestampedleaderboard do
+			--- sort
+			table.sort(scopetable, eep.leaderboardcomp)
+
+			--- truncate by maxvalues
+			for i = #scopetable, maxvalues, -1 do
+				table.remove(scopetable, maxvalues)
+			end
+		end
+
+		return timestampedleaderboard
+	end
+
+	return pcall(leaderboarddatastore.UpdateAsync, leaderboarddatastore, leaderboardtimestampid, transform)
 end
 
 ---                                 $$\                                                 
