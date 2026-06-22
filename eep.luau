@@ -3,6 +3,7 @@
 local DataStoreService = game:GetService("DataStoreService")
 local HttpService = game:GetService("HttpService")
 local MemoryStoreService = game:GetService("MemoryStoreService")
+local MessagingService = game:GetService("MessagingService")
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local TeleportService = game:GetService("TeleportService")
@@ -59,8 +60,8 @@ local eep = {
 			--- ## datamodel settings
 			--- what modules will run when `eep.main(...)` is called
 			moduleset: string;
-			--- will this datamodel run the activity matchmaking job (and also run the queue)
-			domatchmakingtask: boolean;
+			--- will this datamodel attempt to claim the talking stick
+			doclaimtalkingstick: boolean;
 			--- will this datamodel update itself to its associated shared instance
 			dosharedinstancerefresh: boolean;
 			--- will this datamodel pull from postgame sorted/recent stores
@@ -148,48 +149,96 @@ local eep = {
 
 		emptyreserveserverstring = "~";
 	};
-
-	party = {
-		--- memorystore
+	--- talkingstick
+	talkingstick = {
 		store = {
-			key = "eep_parties";
+			key = "eep_talkingstick";
 			value = nil :: MemoryStoreSortedMap?;
-			expiry = 4;
+			expiry = 5;
 			heartbeat = 2;
-			pull = 200;
-			exclusivelowerbound = { sortKey = 0; };
-
-			tasktype = "local" ::
-				| "local" --- matchmaking step contained to this server
-				| "global"; --- matchmaking step contained to partystore
-			
-			talkingstickkey = "__talkingstick" .. "_" .. tostring(game.MatchmakingType.Value);
-			talkingstickvalue = false;
+		};
+		baton = {
+			key = "baton";
+			value = nil :: any;
+			expiry = 60;
 		};
 
-		--- parties in this datamodel
-		value = {} :: {
-			{
-				--- ## datamodel-prescribed
-				--- party guid, is basically an "anchor" in cases where the host leaves
+		--- key .. separator .. regionindex
+		separator = "_";
+		hastalkingstick = false;
+	};
+	--- browser
+	browser = {
+		--- messagingservice
+		store = {
+			topic = "browser";
+			expiry = 24; --- if `(now - timestamp) / 1000 <= expiry` then server is considered expired
+			heartbeat = 10;
+			subscribeasyncconnection = nil :: RBXScriptConnection?;
+
+			data = nil :: any;
+		};
+		cache = {
+
+		} :: {
+			--- string jobid. custom lookups are externally handled by the developer
+			[string]: {
+				--- jobid
 				key: string;
-				--- array of userids that are a part of this party
-				userids: {number};
-				--- array of userids that have been invited to this party
-				invites: {number};
-				--- queued activity index
-				activityindex: number;
-
-				--- ## memorystore-prescribed
-				--- timestamp of when this party was added to the queue
+				--- variant value associated with this private server
+				value: any;
 				timestamp: number;
-				--- reservedserveraccesscode
-				accesscode: string;
-			}
+			};
+		};
+		--- {[number region index] = {externally-written data}}
+		runtime = {} :: {{any}};
+
+		--- if regionindex is 0, how long until a retry is attempted
+		zeroindexlastretry = 0;
+		zeroindexretrycooldownms = 10000;
+		--- number describing index of this server's region in the continentcode table
+		regionindex = 0;
+		ipapiquery = "http://ip-api.com/json/?fields=";
+		ipapifield = "continentCode";
+		continentcodes = {
+			"NA"; --- north america
+			"SA"; --- south america
+			"EU"; --- europe
+			"AF"; --- africa
+			"AS"; --- asia
+			"OC"; --- oceania
+			"AN"; --- antarctica
 		};
 
-		maxuserids = 4;
-		maxinvites = 4;
+		--[[value = {} :: {
+			--- server guid
+			key: string;
+			--- server jobid
+			jobid: string;
+			--- server ip-api region
+			region: string;
+			--- last time this server was resynced
+			timestamp: number;
+
+			--- activity index of this server
+			activityindex: number;
+			--- 0: public
+			--- 1: private
+			type: number;
+			--- 0: public
+			--- 1: private
+			privacy: number;
+			--- 0: none
+			--- n: userid
+			hostuserid: number;
+			--- server join code
+			joincode: string;
+
+			--- list of userids invited to this server
+			invites: {number};
+			--- list of userids present in this server
+			userids: {number};
+		};]]
 	};
 
 	--- global leaderboards
@@ -265,7 +314,8 @@ local eep = {
 		badleaderboardsortedstore = "leaderboard sorted datastore is nil or not a datastore";
 		badpostgamesortedstore = "postgame sorted datastore is nil or not a datastore";
 		badpostgamerecentstore = "postgame recent memorystore is nil or not a memorystorehashmap";
-		badpartymemorystore = "party memorystore is nil or not a memorystoresortedmap";
+		badbrowserdatapacket = "browser data packet is not nil or a table";
+		badbrowserdatapacketkey = "browser data packet key is nil or not a string";
 		badcreatereceiptenvironment = "eep.createreceipt() can only be called on server";
 		badreceipt = "receipt is not a string";
 		badactivityrules = "activity rules are nil or not a table";
@@ -324,19 +374,6 @@ function eep.main(
 		game:BindToClose(function(closereason: Enum.CloseReason)
 			local datamodelkey = eep.datamodelkey(game.PrivateServerId)
 
-			--- removeasync from matchmaking
-			local partysortedmap = eep.party.store.value
-			if partysortedmap and partysortedmap:IsA("MemoryStoreSortedMap") then
-				for _, p in eep.party.value do
-					local removeasyncsuccess, removeasyncresult = pcall(partysortedmap.RemoveAsync, partysortedmap, p.key)
-					if removeasyncsuccess then
-						--- ok
-					else
-						warn(scriptname(), "bindtoclose partysortedmap removeasync error:", removeasyncresult)
-					end
-				end
-			end
-
 			--- removeasync from datamodels
 			local datamodelhashmap = eep.datamodel.store.value
 			if datamodelhashmap and datamodelhashmap:IsA("MemoryStoreHashMap") and datamodelkey ~= "" then
@@ -347,29 +384,28 @@ function eep.main(
 					warn(scriptname(), "bindtoclose datamodelhashmap removeasync error:", removeasyncresult)
 				end
 			end
+
+			--- emit msg to remove server
+			if eep.readkey("publishbrowserentry") == true then
+				local packet = eep.createbrowserpacket()
+				packet.key = game.JobId
+				packet.value = nil
+				packet.timestamp = DateTime.now().UnixTimestampMillis
+
+				local publishasyncsuccess, publishasyncresult = pcall(MessagingService.PublishAsync, MessagingService, eep.browser.store.topic, packet)
+				if publishasyncsuccess then
+					--- ok
+					--- print("emitted browser closure packet for this server")
+				else
+					warn(scriptname(), "bindtoclose browser publishasync error:", publishasyncresult)
+				end
+			end
 		end)
 
 		--- playerremoving remove userid from parties
 		Players.PlayerRemoving:Connect(function(player: Player)
 			local userid = player.UserId
 			local stringuserid = tostring(player.UserId)
-
-			if eep.party[stringuserid] then
-				eep.party[stringuserid] = nil
-
-				local partysortedmap = eep.party.store.value
-				if partysortedmap and partysortedmap:IsA("MemoryStoreSortedMap") then
-					local removeasyncsuccess, removeasyncresult = pcall(partysortedmap.RemoveAsync, partysortedmap, stringuserid)
-					if removeasyncsuccess then
-						--- ok
-					else
-						warn(scriptname(), "playerremoving removeasync error:", removeasyncresult)
-					end
-				end
-			end
-			
-			eep.partyclear(userid)
-			eep.partyclearemptyparties()
 		end)
 
 		--- write datamodel key
@@ -378,7 +414,8 @@ function eep.main(
 		--- start all heartbeats (also inits their associated memorystores)
 		eep.sharedinstancestoreheartbeat()
 		eep.datamodelheartbeat()
-		eep.partyheartbeat(activitymap)
+		eep.talkingstickheartbeat()
+		eep.browserheartbeat()
 		eep.leaderboardheartbeat()
 		eep.postgameheartbeat()
 
@@ -455,6 +492,10 @@ function eep.main(
 			
 			eep.sharedinstanceresync(sharedinstance, sharedinstance.timestamp)
 		end
+
+		--- resolve server region
+		local regionindex = eep.readserverregion()
+		eep.browser.regionindex = regionindex
 	else
 		if loadingscreenprog then
 			pcall(loadingscreenprog, "waiting for server...", 0)
@@ -479,6 +520,8 @@ function eep.main(
 		
 		eep.sharedinstance.key = receipt.sharedinstancekey
 		eep.sharedinstance.peerindex = receipt.peerindex
+		
+		eep.browser.regionindex = receipt.regionindex
 		
 		if loadingscreenprog then
 			pcall(loadingscreenprog, string.format("loading activity '%d'", activityindex), 0)
@@ -553,10 +596,11 @@ end
 --- creates a minimal client-exposable receipt for running eep.main()
 function eep.createreceipt()
 	return string.format(
-		"%d!%d!%s",
+		"%d!%d!%s!%d",
 		eep.sharedinstance.peerindex,
 		eep.activity.index,
-		eep.sharedinstance.key
+		eep.sharedinstance.key,
+		eep.browser.regionindex
 	)
 end
 
@@ -568,11 +612,39 @@ function eep.receiptread(r: string)
 		peerindex = tonumber(split[1])::number;
 		activityindex = tonumber(split[2])::number;
 		sharedinstancekey = split[3];
+		regionindex = tonumber(split[4])::number
 	}
 end
 
---- teleports players to `game.PlaceId`
-function eep.teleporttopublicserver(players: {Player})
+--- shorthand return `RunService:IsServer() == true` and `RunService:IsStudio() == false`
+function eep.readcanenvironmentteleport()
+	return (isserver == true) and (isstudio == false)
+end
+
+--- teleports players to a server given its reserved-server `accesscode`
+function eep.teleporttoserverwithaccesscode(players: {Player}, accesscode: string)
+	assert(isserver, string.format("%s cannot teleport if calling environment is not server", scriptname()))
+	assert(isstudio == false, string.format("%s cannot teleport if calling environment is in studio", scriptname()))
+
+	local teleportoptions = Instance.new("TeleportOptions")
+	teleportoptions.ReservedServerAccessCode = accesscode
+	
+	return pcall(TeleportService.TeleportAsync, TeleportService, game.PlaceId, players, teleportoptions)
+end
+
+--- teleports players to a server given its `jobid`
+function eep.teleporttoserverwithjobid(players: {Player}, jobid: string)
+	assert(isserver, string.format("%s cannot teleport if calling environment is not server", scriptname()))
+	assert(isstudio == false, string.format("%s cannot teleport if calling environment is in studio", scriptname()))
+
+	local teleportoptions = Instance.new("TeleportOptions")
+	teleportoptions.ServerInstanceId = jobid
+	
+	return pcall(TeleportService.TeleportAsync, TeleportService, game.PlaceId, players, teleportoptions)
+end
+
+--- teleports players to a non-reserved `game.PlaceId`
+function eep.teleporttoserver(players: {Player})
 	assert(isserver, string.format("%s cannot teleport if calling environment is not server", scriptname()))
 	assert(isstudio == false, string.format("%s cannot teleport if calling environment is in studio", scriptname()))
 
@@ -962,433 +1034,84 @@ function eep.datamodelkey(privateserverid: string)
 	end
 end
 
----                                $$\               
----                                $$ |              
----  $$$$$$\   $$$$$$\   $$$$$$\ $$$$$$\   $$\   $$\ 
---- $$  __$$\  \____$$\ $$  __$$\\_$$  _|  $$ |  $$ |
---- $$ /  $$ | $$$$$$$ |$$ |  \__| $$ |    $$ |  $$ |
---- $$ |  $$ |$$  __$$ |$$ |       $$ |$$\ $$ |  $$ |
---- $$$$$$$  |\$$$$$$$ |$$ |       \$$$$  |\$$$$$$$ |
---- $$  ____/  \_______|\__|        \____/  \____$$ |
---- $$ |                                   $$\   $$ |
---- $$ |                                   \$$$$$$  |
---- \__|                                    \______/ 
+---   $$\               $$\ $$\       $$\                                 $$\     $$\           $$\       
+---   $$ |              $$ |$$ |      \__|                                $$ |    \__|          $$ |      
+--- $$$$$$\    $$$$$$\  $$ |$$ |  $$\ $$\ $$$$$$$\   $$$$$$\   $$$$$$$\ $$$$$$\   $$\  $$$$$$$\ $$ |  $$\ 
+--- \_$$  _|   \____$$\ $$ |$$ | $$  |$$ |$$  __$$\ $$  __$$\ $$  _____|\_$$  _|  $$ |$$  _____|$$ | $$  |
+---   $$ |     $$$$$$$ |$$ |$$$$$$  / $$ |$$ |  $$ |$$ /  $$ |\$$$$$$\    $$ |    $$ |$$ /      $$$$$$  / 
+---   $$ |$$\ $$  __$$ |$$ |$$  _$$<  $$ |$$ |  $$ |$$ |  $$ | \____$$\   $$ |$$\ $$ |$$ |      $$  _$$<  
+---   \$$$$  |\$$$$$$$ |$$ |$$ | \$$\ $$ |$$ |  $$ |\$$$$$$$ |$$$$$$$  |  \$$$$  |$$ |\$$$$$$$\ $$ | \$$\ 
+---    \____/  \_______|\__|\__|  \__|\__|\__|  \__| \____$$ |\_______/    \____/ \__| \_______|\__|  \__|
+---                                                 $$\   $$ |                                            
+---                                                 \$$$$$$  |                                            
+---                                                  \______/                                             
 
---- runs matchmakingtask heartbeat \
-function eep.partyheartbeat(activitymap: activitymap)
-	--- datamodelvalue memorystore
-	local partystore = eep.party.store
-	partystore.value = MemoryStoreService:GetSortedMap(partystore.key)
-	local partysortedmap = partystore.value
+function eep.talkingstickheartbeat()
+	local talkingstickstore = eep.talkingstick.store
 
-	if partysortedmap and partysortedmap:IsA("MemoryStoreSortedMap") then
-		--- heartbeat
-		local function partyheartbeat()
-			if eep.readkey("domatchmakingtask") ~= true then return end
-			
-			--- party matchmaking task
-			local tasktype = partystore.tasktype
-
-			if tasktype == "local" then
-				--- resync from sortedmap
-				eep.partyprestep()
-
-				--- teleport
-				eep.partyteleportstep()
-
-				--- convert to getasyncresult
-				local fakegetasyncresult = {}
-				for _, party in ipairs(eep.party.value) do
-					table.insert(fakegetasyncresult, {
-						key = party.key;
-						sortKey = party.timestamp;
-						value = party;
-					})
-				end
-
-				--- pool local parties, apply matchmaking
-				local pool = eep.createpool(fakegetasyncresult)
-				local receipt = eep.poolallocatestep(pool, activitymap)
-				local partykeyaccesscodemap = eep.poolpopulatestep(receipt)
-				local writeaccesscodesuccess = eep.poolwriteaccesscodestep(partykeyaccesscodemap)
-				if writeaccesscodesuccess then
-					--- ok
-				else
-					warn(scriptname(), "error updateasync-ing parties with reservedserveraccesscode")
-				end
-
-			elseif tasktype == "global" then
-				--- resync from sortedmap
-				eep.partyprestep()
-
-				--- teleport
-				eep.partyteleportstep()
-
-				--- get talking stick
-				local hastalkingstick = eep.talkingstickattemptclaim()
-
-				if hastalkingstick == true then
-					--- getrangeasync pull
-					local getrangeasyncsuccess, getrangeasyncresult: { {
-						key: string;
-						sortKey: number;
-						value: typeof(eep.party.value[1]);
-					} }? = pcall(
-						partysortedmap.GetRangeAsync,
-						partysortedmap,
-						Enum.SortDirection.Ascending,
-						partystore.pull,
-						partystore.exclusivelowerbound
-					)
-					if getrangeasyncsuccess and getrangeasyncresult then
-						--- pool parties, apply matchmaking
-						local pool = eep.createpool(getrangeasyncresult)
-						local receipt = eep.poolallocatestep(pool, activitymap)
-						local partykeyaccesscodemap = eep.poolpopulatestep(receipt)
-						local writeaccesscodesuccess = eep.poolwriteaccesscodestep(partykeyaccesscodemap)
-						if writeaccesscodesuccess then
-							--- ok
-						else
-							warn(scriptname(), "error updateasync-ing parties with reservedserveraccesscode")
-						end
-
-					else
-						warn(scriptname(), "partysortedmap getrangeasync error:", getrangeasyncresult)
-					end
-				else
-					--- datamodel does not have the talking stick ToT
-				end
-
+	--- attempt claim
+	--- if claim success:
+	--- 	talkingstickclaimed(true)
+	--- 		pull baton
+	---			write/read/apply matchmaking
+	--- 		update baton
+	--- 		push baton
+	--- if claim failure:
+	--- 	talkingstickclaimed(false)
+	--- 		pull baton
+	---			read/apply matchmaking
+	local function talkingstickheartbeat()
+		if eep.readkey("doclaimtalkingstick") == true then
+			local hastalkingstick = eep.talkingstickattemptclaim()
+			if hastalkingstick then
+				--- claimed
 			else
-				--- naur
-				warn(scriptname(), "unknown matchmakingtasktype:", tasktype)
-
-				return
+				--- do nothing
 			end
-		end
-		
-		framerule(partystore.heartbeat, -1, partyheartbeat)
-	else
-		warn(scriptname(), eep.assertions.badpartymemorystore)
-	end
-end
 
---- resyncs parties from this datamodel \
---- removes if not present \
---- returns operation time
-function eep.partyprestep()
-	local partysortedmap = eep.party.store.value
-	assert(partysortedmap and partysortedmap:IsA("MemoryStoreSortedMap"), eep.assertions.badpartymemorystore)
+			--- print("claim talkingstick result:", hastalkingstick)
 
-	local unixtimestampmillis = DateTime.now().UnixTimestampMillis
-
-	for _, datamodelparty in ipairs(eep.party.value) do
-		local key = datamodelparty.key
-
-		local updateasyncsuccess, updateasyncresult = pcall(
-			partysortedmap.UpdateAsync,
-			partysortedmap,
-			key,
-			function(p: typeof(eep.createparty())?): (any, number?)
-				if p then
-					--- write from datamodel party to memorystore party
-					p.userids = datamodelparty.userids
-					p.invites = datamodelparty.invites
-					p.activityindex = datamodelparty.activityindex
-				else
-					p = datamodelparty
-				end
-
-				assert(p ~= nil)
-
-				--- update timestamp
-				if p.accesscode ~= "" then
-					--- was assigned activity
-					p.timestamp = -1
-				elseif p.activityindex == -1 then
-					--- not queued for anything
-					p.timestamp = -1
-				elseif #p.userids <= 0 then
-					--- empty party
-					p.timestamp = -1
-				else
-					if p.timestamp == -1 then
-						--- queue
-						p.timestamp = unixtimestampmillis
-					else
-						--- already queued
-					end
-				end
-
-				--- write from memorystore party to datamodel party
-				datamodelparty.accesscode = p.accesscode
-				datamodelparty.timestamp = p.timestamp
-
-				return p, p.timestamp
-			end,
-			eep.party.store.expiry
-		)
-		if updateasyncsuccess then
-			--- ok
-		else
-			warn(scriptname(), "prestep updateasync error:", updateasyncresult)
+			eep.talkingstickclaimed(hastalkingstick)
 		end
 	end
 
-	return DateTime.now().UnixTimestampMillis - unixtimestampmillis
+	framerule(talkingstickstore.heartbeat, -1, talkingstickheartbeat)
 end
 
-function eep.partyteleportstep()
-	for _, datamodelparty in ipairs(eep.party.value) do
-		local reservedserveraccesscode = datamodelparty.accesscode
-		
-		if reservedserveraccesscode ~= "" then
+function eep.talkingstickreadbaton()
+	local talkingstickbaton = eep.talkingstick.baton
 
-			if isstudio then
-				print("not teleporting (studio)")
-			else
-				local teleportoptions = Instance.new("TeleportOptions")
-				teleportoptions.ReservedServerAccessCode = reservedserveraccesscode
+	local datamodelhashmap = eep.datamodel.store.value
+	assert(datamodelhashmap and datamodelhashmap:IsA("MemoryStoreHashMap"), eep.assertions.baddatamodelmemorystore)
 
-				local teleportasyncsuccess, teleportasyncresult = pcall(TeleportService.TeleportAsync, TeleportService, game.PlaceId, eep.useridstoplayers(datamodelparty.userids), teleportoptions)
-				if teleportasyncsuccess then
-					--- ok
-					--- print(scriptname(), string.format("teleporting [%s] to activity %s", table.concat(datamodelparty.userids, ", "), reservedserveraccesscode))
-				else
-					warn(scriptname(), string.format("partyteleportstep() error: (unable to teleport [%s])", table.concat(datamodelparty.userids, ", ")), teleportasyncresult)
-				end
-			end
-		end
-	end
+	return pcall(
+		datamodelhashmap.GetAsync,
+		datamodelhashmap,
+		talkingstickbaton.key .. eep.talkingstick.separator .. eep.browser.regionindex
+	)
 end
 
---- creates a queued-for-activity pool \
---- `{[string activitykey]: { {key: string; userids: {number}} }}`
-function eep.createpool(getrangeasyncresult: {{
-	key: string;
-	sortKey: number;
-	value: typeof(eep.party.value[1]);
-}})
-	local t = {}::{{
-		activityindex: number;
-		parties: { { key: string, userids: {number} } };
-		population: number;
-	}};
+function eep.talkingstickpushbaton()
+	local talkingstickbaton = eep.talkingstick.baton
 
-	for i, v in ipairs(getrangeasyncresult) do
-		local party = v.value
-		--- do not consider if empty activityindex
-		local activityindex = party.activityindex
-		if activityindex == -1 then continue end
+	local datamodelhashmap = eep.datamodel.store.value
+	assert(datamodelhashmap and datamodelhashmap:IsA("MemoryStoreHashMap"), eep.assertions.baddatamodelmemorystore)
 
-		--- do not consider if already has accesscode
-		local accesscode = party.accesscode
-		if accesscode ~= "" then continue end
-
-		--- do not consider if timestamp is lt 0 (indicates dequeued)
-		local timestamp = party.timestamp
-		if timestamp == -1 then continue end
-
-		--- lf preexisting
-		local createnew = true
-		for _, pool in t do
-			if pool.activityindex == activityindex then
-				createnew = false
-				break
-			end
-		end
-		if createnew == true then
-			table.insert(t, {
-				activityindex = activityindex;
-				parties = {}::{ { key: string, userids: {number} } };
-				population = 0;
-			})
-		end
-
-		--- insert
-		for _, pool in t do
-			if pool.activityindex == activityindex then
-				table.insert(pool.parties, { key = party.key; userids = party.userids; })
-				pool.population += #party.userids
-
-				break
-			end
-		end
-	end
-
-	return t
+	return pcall(
+		datamodelhashmap.SetAsync,
+		datamodelhashmap,
+		talkingstickbaton.key .. eep.talkingstick.separator .. eep.browser.regionindex,
+		talkingstickbaton.value,
+		talkingstickbaton.expiry
+	)
 end
 
---- check if party still exists \
---- preallocate userids for each activity type \
---- create sharedinstance for each successful preallocation \
---- allocate userids to sharedinstance peers \
---- updateasync relevant parties with sharedinstance peer accesscode \
---- returns `{ typeof(eep.createsharedinstance(...)) }`
-function eep.poolallocatestep(pool: typeof(eep.createpool(...)), activitymap: activitymap)
-	local partysortedmap = eep.party.store.value
-	assert(partysortedmap and partysortedmap:IsA("MemoryStoreSortedMap"), eep.assertions.badpartymemorystore)
+--- to be overwritten externally
+function eep.talkingstickclaimed(hastalkingstick: boolean)
 
-	--- filter allocatable based on:
-	--- population of userids queued for activity
-	--- whether the party queued for this activity is still queued for this activity
-	--- "if the parties queued for this activity were to be assigned a sharedinstance peer, what would it look like"
-
-	--- todo this can be a recursive operaton to flush the entire range
-	--- but keeping it 1 per poolstep per activity in the meantime
-
-	local receipt = {}
-
-	for _, activityentry in pairs(pool) do
-		local activityindex = activityentry.activityindex
-		local population = activityentry.population
-		local parties = activityentry.parties
-
-		local activitydata = activitymap[activityindex]
-		local sharedinstancepeers = activitydata.sharedinstancepeers
-		local sharedinstanceuseridsperpeer = activitydata.sharedinstanceuseridsperpeer
-		local required = sharedinstancepeers * sharedinstanceuseridsperpeer
-
-		--- pulse check
-		for i = #parties, 1, -1 do
-			local party = parties[i]
-
-			local getasyncsuccess, p: typeof(eep.createparty())? = pcall(
-				partysortedmap.GetAsync,
-				partysortedmap,
-				party.key
-			)
-
-			local remove = false
-			if getasyncsuccess and p then
-				remove = p.accesscode ~= "" or --- was assigned activity
-						p.activityindex == -1 or --- not queued for anything
-						#p.userids <= 0 or --- empty party
-						p.timestamp == -1 or --- dequeued
-						false
-			else
-				remove = true
-
-				if not getasyncsuccess then
-					warn(scriptname(), "pulse check getasync error:", p)
-				end
-			end
-
-			if remove == true then
-				population -= #party.userids
-
-				table.remove(parties, i)
-			end
-		end
-
-		if population < required then continue end
-
-		--- allocate
-		local sharedinstance = eep.createsharedinstance(activityindex, sharedinstancepeers)
-		for peerindex = 1, sharedinstancepeers do
-			local userids = table.create(sharedinstanceuseridsperpeer) :: {number}
-			local partykeys = table.create(sharedinstanceuseridsperpeer) :: {string}
-
-			local toremove = table.create(sharedinstanceuseridsperpeer) :: {number}
-
-			for i, party in ipairs(parties) do
-				--- if userids can fit into this peer,
-				--- allocate userids
-				--- insert party key for later sending accesscode
-				if #userids + #party.userids <= sharedinstanceuseridsperpeer then
-					table.move(party.userids, 1, #party.userids, #userids + 1, userids)
-					table.insert(partykeys::any, party.key::any)
-
-					table.insert(toremove, i)
-
-					if #userids == sharedinstanceuseridsperpeer then
-						break
-					end
-				end
-			end
-
-			for i = #toremove, 1, -1 do
-				table.remove(parties, toremove[i])
-			end
-
-			--- insert if and only if exactly enough userids were allocated
-			if #userids == sharedinstanceuseridsperpeer then
-				local peer = sharedinstance.peers[peerindex]
-				
-				table.move(userids, 1, #userids, #peer.expectinguserids + 1, peer.expectinguserids)
-				table.move(partykeys, 1, #partykeys, #peer.partykeys + 1, peer.partykeys)
-			end
-		end
-
-		--- insert if and only if all hypothetical peers were allocated
-		if eep.sharedinstancecountuserids(sharedinstance) == required then
-			table.insert(receipt, sharedinstance)
-		end
-	end
-
-	return receipt
 end
 
---- reserves servers \
---- setasync to memorystore \
---- returns { [string partykey]: string reservedserveraccesscode }
-function eep.poolpopulatestep(sharedinstances: { typeof(eep.createsharedinstance(...)) })
-	local result = {}
-
-	for i, sharedinstance in ipairs(sharedinstances) do
-		eep.sharedinstancereserveservers(sharedinstance::any)
-		local setasyncsuccess = eep.sharedinstancesetasync(sharedinstance::any)
-		if setasyncsuccess then
-			local accesscodemap = eep.sharedinstanceresolveaccesscodemap(sharedinstance::any)
-
-			for partykey, reservedserveraccesscode in accesscodemap do
-				result[partykey] = reservedserveraccesscode
-			end
-		else
-			break
-		end
-	end
-
-	return result
-end
-
---- partyaccesscodemap `{ [string partykey]: string reservedserveraccesscode }`
-function eep.poolwriteaccesscodestep(partykeyaccesscodemap: {[string]: string})
-	local success = true
-
-	local partysortedmap = eep.party.store.value
-	assert(partysortedmap and partysortedmap:IsA("MemoryStoreSortedMap"), eep.assertions.badpartymemorystore)
-
-	for partykey, reservedserveraccesscode in partykeyaccesscodemap do
-		local updateasyncsuccess, updateasyncresult = pcall(
-			partysortedmap.UpdateAsync,
-			partysortedmap,
-			partykey,
-			function(p: typeof(eep.createparty())?): (any, number?)
-				if p then
-					p.accesscode = reservedserveraccesscode
-					
-					return p
-				end
-
-				return nil
-			end,
-			eep.party.store.expiry
-		)
-		if updateasyncsuccess then
-			--- ok
-		else
-			success = false
-
-			warn(scriptname(), "prestep updateasync error:", updateasyncresult)
-			break
-		end
-	end
-
-	return success
-end
-
---- creates a matchmakingtask talking stick
+--- creates a talking stick unique to this server
 function eep.createtalkingstick()
 	return {
 		timestamp = DateTime.now().UnixTimestampMillis;
@@ -1396,10 +1119,10 @@ function eep.createtalkingstick()
 	}
 end
 
---- attempts to claim the talking stick for global matchmaking \
---- returns `eep.party.store.talkingstickvalue` for convenience
+--- attempts to claim the talking stick for regionindex-specific matchmaking \
+--- returns `eep.talkingstick.hastalkingstick` for convenience
 function eep.talkingstickattemptclaim()
-	local partystore = eep.party.store
+	local talkingstickstore = eep.talkingstick.store
 
 	local datamodelhashmap = eep.datamodel.store.value
 	assert(datamodelhashmap and datamodelhashmap:IsA("MemoryStoreHashMap"), eep.assertions.baddatamodelmemorystore)
@@ -1407,183 +1130,138 @@ function eep.talkingstickattemptclaim()
 	local talkingsticksuccess, talkingstickresult = pcall(
 		datamodelhashmap.UpdateAsync,
 		datamodelhashmap,
-		partystore.talkingstickkey,
+		talkingstickstore.key .. eep.talkingstick.separator .. eep.browser.regionindex,
 		function(t: typeof(eep.createtalkingstick())?): any
 			if t == nil or t and t.jobid == game.JobId then
-
 				return eep.createtalkingstick()
-			else
 
+			else
 				return nil
+
 			end
 		end,
-		partystore.expiry
+		talkingstickstore.expiry
 	)
 	if talkingsticksuccess then
-		partystore.talkingstickvalue = talkingstickresult ~= nil and talkingstickresult.jobid == game.JobId or false
+		eep.talkingstick.hastalkingstick = talkingstickresult ~= nil and talkingstickresult.jobid == game.JobId or false
 	else
-		partystore.talkingstickvalue = false
+		eep.talkingstick.hastalkingstick = false
 
 		warn(scriptname(), "claim talking stick error:", talkingstickresult)
 	end
 
-	return partystore.talkingstickvalue
+	return eep.talkingstick.hastalkingstick
 end
 
---- converts userids to player instances
-function eep.useridstoplayers(userids: {number})
-	local result = table.create(#userids) :: {Player}
+--- $$\                                                                       
+--- $$ |                                                                      
+--- $$$$$$$\   $$$$$$\   $$$$$$\  $$\  $$\  $$\  $$$$$$$\  $$$$$$\   $$$$$$\  
+--- $$  __$$\ $$  __$$\ $$  __$$\ $$ | $$ | $$ |$$  _____|$$  __$$\ $$  __$$\ 
+--- $$ |  $$ |$$ |  \__|$$ /  $$ |$$ | $$ | $$ |\$$$$$$\  $$$$$$$$ |$$ |  \__|
+--- $$ |  $$ |$$ |      $$ |  $$ |$$ | $$ | $$ | \____$$\ $$   ____|$$ |      
+--- $$$$$$$  |$$ |      \$$$$$$  |\$$$$$\$$$$  |$$$$$$$  |\$$$$$$$\ $$ |      
+--- \_______/ \__|       \______/  \_____\____/ \_______/  \_______|\__|      
+---                                                                           
+---                                                                           
+---                                                                           
 
-	for _, userid in ipairs(userids) do
-		local player = Players:GetPlayerByUserId(userid)
-		if player then
-			table.insert(result, player)
+--- runs browser heartbeat
+function eep.browserheartbeat()
+	local browserstore = eep.browser.store
+	local topic = browserstore.topic
+
+	local function browserheartbeat()
+		if eep.readkey("dobrowserrefresh") == true then
+			if browserstore.subscribeasyncconnection == nil then
+				local subscribeasyncsuccess, subscribeasyncresult = pcall(MessagingService.SubscribeAsync, MessagingService, topic, function(t: { Data: typeof(eep.createbrowserpacket()); Sent: number })
+					local data = t.Data
+					assert(type(data) == "table", eep.assertions.badbrowserdatapacket)
+
+					local key = data.key
+					local value = data.value
+					assert(type(key) == "string", eep.assertions.badbrowserdatapacketkey)
+
+					if type(value) == "nil" then
+						--- instruction to remove server from listing
+						eep.browser.cache[key] = nil
+					else
+						--- print(string.format("%s got packet from server %s @ %d (%s):", scriptname(), key, t.Sent, type(value)), value)
+						eep.browser.cache[key] = data
+					end
+				end)
+				if subscribeasyncsuccess then
+					--- ok
+					browserstore.subscribeasyncconnection = subscribeasyncresult
+				else
+					warn(scriptname(), "browser subscribeasync error:", subscribeasyncresult)
+				end
+			end
+		end
+
+		if eep.readkey("publishbrowserentry") ~= true then return end
+
+		--- attempt to retry if regionindex is 0
+		local now = DateTime.now().UnixTimestampMillis
+		if eep.browser.regionindex == 0 then
+			if eep.browser.zeroindexlastretry < now then
+				eep.browser.zeroindexlastretry = now + eep.browser.zeroindexretrycooldownms
+
+				eep.browser.regionindex = eep.readserverregion()
+			end
+		end
+
+		local data = browserstore.data
+		if data ~= nil then
+			local packet = eep.createbrowserpacket()
+			packet.key = game.JobId
+			packet.value = data
+			packet.timestamp = DateTime.now().UnixTimestampMillis
+
+			local publishasyncsuccess, publishasyncresult = pcall(MessagingService.PublishAsync, MessagingService, topic, packet)
+			if publishasyncsuccess then
+				--- ok
+				--- print("published packet", packet, "@", packet.timestamp)
+			else
+				warn(scriptname(), "browser publishasync error:", publishasyncresult)
+			end
 		end
 	end
-
-	return result
-end
-
---- creates an empty party \
---- accesscodes are userid-specific and are independent from party
-function eep.createparty(): typeof(eep.party.value[1])
-	return {
-		key = HttpService:GenerateGUID(false);
-
-		userids = table.create(Players.MaxPlayers) :: { number };
-		invites = table.create(Players.MaxPlayers) :: { number };
-		activityindex = -1;
-
-		timestamp = -1;
-		accesscode = "";
-	}
-end
-
-function eep.partyinsert(p: typeof(eep.createparty()))
-	if not eep.partyfindfromkey(p.key) then
-		table.insert(eep.party.value, p)
 		
-		return true
-	end
-
-	return false
+	framerule(browserstore.heartbeat, -1, browserheartbeat)
 end
 
---- returns index,party pair of party whose key matches key
-function eep.partyfindfromkey(key: string): (number?, typeof(eep.createparty())?)
-	for i, p in ipairs(eep.party.value) do
-		if p.key == key then
-			return i, p
+function eep.readserverregion()
+	local index = 0
+	local query = eep.browser.ipapiquery
+	local field = eep.browser.ipapifield
+	local getasyncsuccess, getasyncresult = pcall(HttpService.GetAsync, HttpService, query .. field)
+	if getasyncsuccess then
+		local response = HttpService:JSONDecode(getasyncresult)
+		if type(response) == "table" then
+			local fieldvalue = response[field]
+			index = table.find(eep.browser.continentcodes, fieldvalue) or 0
+			if eep.browser.continentcodes[index] == nil then
+				warn(scriptname(), string.format("unknown continent code '%s'", fieldvalue or tostring(fieldvalue)))
+			end
+		else
+			warn(scriptname(), string.format("getasync response didn't decode into a table (decoded into: %s)", type(response)))
 		end
+	else
+		warn(scriptname(), "readserverregion error:", getasyncresult)
 	end
 
-	return nil, nil
+	return index
 end
 
---- removes any parties with no userids
-function eep.partyclearemptyparties()
-	for i = #eep.party.value, 1, -1 do
-		local p = eep.party.value[i]
-		
-		if #p.userids < 1 then
-			table.remove(eep.party.value, i)
-		end
-	end
-end
-
---- removes all occurrences of userid in all parties
-function eep.partyclear(userid: number)
-	for _, p in ipairs(eep.party.value) do
-		eep.partyremoveuserid(p, userid)
-		eep.partyremoveinvite(p, userid)
-	end
-end
-
---- returns first userid of party
-function eep.partyreadhost(p: typeof(eep.createparty()))
-	return p.userids[1]
-end
-
---- finds first occurrence of userid in parties
-function eep.partyfind(userid: number): (typeof(eep.createparty())?, number?)
-	for _, p in ipairs(eep.party.value) do
-		local i = eep.partyfinduserid(p, userid)
-		if i then
-			return p, i
-		end
-	end
-
-	return nil, nil
-end
-
---- returns first occurrence of userid in party userids
-function eep.partyfinduserid(p: typeof(eep.createparty()), userid: number)
-	return table.find(p.userids, userid)
-end
-
---- inserts userid into party userids, if userid is not already present \
---- returns true if userid was actually inserted
-function eep.partyadduserid(p: typeof(eep.createparty()), userid: number)
-	if not table.find(p.userids, userid) then
-		table.insert(p.userids, userid)
-
-		return true
-	end
-
-	return false
-end
-
---- removes userid from party userids, if userid is present \
---- returns true if userid was actually removed
-function eep.partyremoveuserid(p: typeof(eep.createparty()), userid: number)
-	for i = #p.userids, 1, -1 do
-		if p.userids[i] == userid then
-			table.remove(p.userids, i)
-		end
-	end
-end
-
---- returns first occurrence of userid in party invites
-function eep.partyfindinvite(p: typeof(eep.createparty()), userid: number)
-	return table.find(p.invites, userid)
-end
-
---- inserts userid into party invites, if userid is not already present \
---- returns true if userid was actually inserted
-function eep.partyaddinvite(p: typeof(eep.createparty()), userid: number)
-	if not table.find(p.invites, userid) then
-		table.insert(p.invites, userid)
-
-		return true
-	end
-
-	return false
-end
-
---- removes userid from party invites, if userid is present \
---- returns true if userid was actually removed
-function eep.partyremoveinvite(p: typeof(eep.createparty()), userid: number)
-	local result = false
-	for i = #p.invites, 1, -1 do
-		if p.invites[i] == userid then
-			table.remove(p.invites, i)
-
-			result = true
-		end
-	end
-
-	return result
-end
-
---- returns a filtered party instance with the accesscode represented as either `"~"` or `""`
-function eep.createfilteredparty(p: typeof(eep.createparty()))
+function eep.createbrowserpacket()
 	return {
-		key = p.key;
-		userids = p.userids;
-		invites = p.invites;
-		activityindex = p.activityindex;
-		accesscode = p.accesscode ~= "" and "~" or "";
-		timestamp = p.timestamp;
+		--- server jobid
+		key = "";
+		--- browser value
+		value = nil :: any?;
+		--- unixtimestampmillis associated with this packet \
+		--- should be the time that the packet was sent
+		timestamp = 0;
 	}
 end
 
@@ -1617,7 +1295,7 @@ function eep.leaderboardheartbeat()
 			local pullsuccess, pullresult = eep.leaderboardpull()
 			if pullsuccess then
 				--- ok
-				print(pullsuccess, pullresult)
+				--- print(pullsuccess, pullresult)
 			else
 				warn(scriptname(), "leaderboard pull error:", pullresult)
 			end
