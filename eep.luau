@@ -2,14 +2,16 @@
 
 local DataStoreService = game:GetService("DataStoreService")
 local HttpService = game:GetService("HttpService")
+local LocalizationService = game:GetService("LocalizationService")
 local MemoryStoreService = game:GetService("MemoryStoreService")
 local MessagingService = game:GetService("MessagingService")
-local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local TeleportService = game:GetService("TeleportService")
 
 local isserver = RunService:IsServer()
 local isstudio = RunService:IsStudio()
+
+local structureversionkey = string.format("%x", 2)
 
 --- runs function at `step` second interval for `time` seconds \
 --- exceptions: \
@@ -85,7 +87,7 @@ local eep = {
 	datamodel = {
 		--- memorystore
 		store = {
-			key = "eep_datamodels";
+			key = "eep_datamodels" .. structureversionkey;
 			value = nil :: MemoryStoreHashMap?;
 			expiry = 1 * (60);
 			heartbeat = 0;
@@ -99,7 +101,7 @@ local eep = {
 	sharedinstance = {
 		--- memorystore
 		store = {
-			key = "eep_sharedinstances";
+			key = "eep_sharedinstances" .. structureversionkey;
 			value = nil :: MemoryStoreHashMap?;
 			expiry = 1 * (60);
 			heartbeat = 2;
@@ -152,13 +154,19 @@ local eep = {
 	--- talkingstick
 	talkingstick = {
 		store = {
-			key = "eep_talkingstick";
-			value = nil :: MemoryStoreSortedMap?;
-			expiry = 5;
-			heartbeat = 2;
+			key = "eep_talkingstick" .. structureversionkey;
+			value = nil :: MemoryStoreHashMap?;
+			expiry = 12 + 1;
+			heartbeat = 6;
+
+			topic = "talkingstick" .. structureversionkey;
+			subscribeasyncconnection = nil :: RBXScriptConnection?;
+
+			--- read externally for sending fixed-rate messages to talkingstick instances
+			messageheartbeat = 2;
 		};
 		baton = {
-			key = "baton";
+			key = "baton" .. structureversionkey;
 			value = nil :: any;
 			expiry = 60;
 		};
@@ -169,37 +177,31 @@ local eep = {
 	};
 	--- browser
 	browser = {
-		--- messagingservice
 		store = {
-			topic = "browser";
-			expiry = 24; --- if `(now - timestamp) / 1000 <= expiry` then server is considered expired
-			heartbeat = 10;
-			subscribeasyncconnection = nil :: RBXScriptConnection?;
+			key = "eep_browser" .. structureversionkey;
+			value = nil :: MemoryStoreHashMap?;
+			expiry = 2 + 16;
+			heartbeat = 8;
 
+			--- handled externally
 			data = nil :: any;
 		};
-		cache = {
+		--- key .. separator .. regionindex
+		separator = "_";
+		--- continent codes to pull regions from, written externally. separate from continentcodes as regions such as AF/AN don't exist
+		pullrange = {} :: {string};
 
-		} :: {
-			--- string jobid. custom lookups are externally handled by the developer
-			[string]: {
-				--- jobid
-				key: string;
-				--- variant value associated with this private server
-				value: any;
-				timestamp: number;
-			};
-		};
-		--- {[number region index] = {externally-written data}}
+		--- raw pull value from eep.browserpull()
+		--- `{[string continentcode]: any}`
+		cache = {} :: { [string]: any };
+		--- `{[number region index] = {externally-written data}}`
 		runtime = {} :: {{any}};
 
 		--- if regionindex is 0, how long until a retry is attempted
 		zeroindexlastretry = 0;
-		zeroindexretrycooldownms = 10000;
+		zeroindexretrycooldownms = 60000;
 		--- number describing index of this server's region in the continentcode table
 		regionindex = 0;
-		ipapiquery = "http://ip-api.com/json/?fields=";
-		ipapifield = "continentCode";
 		continentcodes = {
 			"NA"; --- north america
 			"SA"; --- south america
@@ -208,37 +210,255 @@ local eep = {
 			"AS"; --- asia
 			"OC"; --- oceania
 			"AN"; --- antarctica
+			"??"; --- unknown
 		};
-
-		--[[value = {} :: {
-			--- server guid
-			key: string;
-			--- server jobid
-			jobid: string;
-			--- server ip-api region
-			region: string;
-			--- last time this server was resynced
-			timestamp: number;
-
-			--- activity index of this server
-			activityindex: number;
-			--- 0: public
-			--- 1: private
-			type: number;
-			--- 0: public
-			--- 1: private
-			privacy: number;
-			--- 0: none
-			--- n: userid
-			hostuserid: number;
-			--- server join code
-			joincode: string;
-
-			--- list of userids invited to this server
-			invites: {number};
-			--- list of userids present in this server
-			userids: {number};
-		};]]
+		countryisotocontinentcode = {
+			AB = "AS";
+			AD = "EU";
+			AE = "AS";
+			AF = "AS";
+			AG = "NA";
+			AI = "NA";
+			AL = "EU";
+			AM = "AS";
+			AO = "AF";
+			AR = "SA";
+			AS = "OC";
+			AT = "EU";
+			AU = "OC";
+			AW = "NA";
+			AX = "EU";
+			AZ = "AS";
+			BA = "EU";
+			BB = "NA";
+			BD = "AS";
+			BE = "EU";
+			BF = "AF";
+			BG = "EU";
+			BH = "AS";
+			BI = "AF";
+			BJ = "AF";
+			BL = "NA";
+			BM = "NA";
+			BN = "AS";
+			BO = "SA";
+			BQ = "NA";
+			BR = "SA";
+			BS = "NA";
+			BT = "AS";
+			BV = "AN";
+			BW = "AF";
+			BY = "EU";
+			BZ = "NA";
+			CA = "NA";
+			CC = "AS";
+			CD = "AF";
+			CF = "AF";
+			CG = "AF";
+			CH = "EU";
+			CI = "AF";
+			CK = "OC";
+			CL = "SA";
+			CM = "AF";
+			CN = "AS";
+			CO = "SA";
+			CR = "NA";
+			CU = "NA";
+			CV = "AF";
+			CW = "NA";
+			CX = "AS";
+			CY = "AS";
+			CZ = "EU";
+			DE = "EU";
+			DJ = "AF";
+			DK = "EU";
+			DM = "NA";
+			DO = "NA";
+			DZ = "AF";
+			EC = "SA";
+			EE = "EU";
+			EG = "AF";
+			ER = "AF";
+			ES = "EU";
+			ET = "AF";
+			FI = "EU";
+			FJ = "OC";
+			FK = "SA";
+			FM = "OC";
+			FO = "EU";
+			FR = "EU";
+			GA = "AF";
+			GB = "EU";
+			GD = "NA";
+			GE = "AS";
+			GF = "SA";
+			GG = "EU";
+			GH = "AF";
+			GI = "EU";
+			GL = "NA";
+			GM = "AF";
+			GN = "AF";
+			GP = "NA";
+			GQ = "AF";
+			GR = "EU";
+			GS = "SA";
+			GT = "NA";
+			GU = "OC";
+			GW = "AF";
+			GY = "SA";
+			HK = "AS";
+			HM = "AN";
+			HN = "NA";
+			HR = "EU";
+			HT = "NA";
+			HU = "EU";
+			ID = "AS";
+			IE = "EU";
+			IL = "AS";
+			IM = "EU";
+			IN = "AS";
+			IO = "AS";
+			IQ = "AS";
+			IR = "AS";
+			IS = "EU";
+			IT = "EU";
+			JE = "EU";
+			JM = "NA";
+			JO = "AS";
+			JP = "AS";
+			KE = "AF";
+			KG = "AS";
+			KH = "AS";
+			KI = "OC";
+			KM = "AF";
+			KN = "NA";
+			KP = "AS";
+			KR = "AS";
+			KW = "AS";
+			KY = "NA";
+			KZ = "AS";
+			LA = "AS";
+			LB = "AS";
+			LC = "NA";
+			LI = "EU";
+			LK = "AS";
+			LR = "AF";
+			LS = "AF";
+			LT = "EU";
+			LU = "EU";
+			LV = "EU";
+			LY = "AF";
+			MA = "AF";
+			MC = "EU";
+			MD = "EU";
+			ME = "EU";
+			MF = "NA";
+			MG = "AF";
+			MH = "OC";
+			MK = "EU";
+			ML = "AF";
+			MM = "AS";
+			MN = "AS";
+			MO = "AS";
+			MP = "OC";
+			MQ = "NA";
+			MR = "AF";
+			MS = "NA";
+			MT = "EU";
+			MU = "AF";
+			MV = "AS";
+			MW = "AF";
+			MX = "NA";
+			MY = "AS";
+			MZ = "AF";
+			NA = "AF";
+			NC = "OC";
+			NE = "AF";
+			NF = "OC";
+			NG = "AF";
+			NI = "NA";
+			NL = "EU";
+			NO = "EU";
+			NP = "AS";
+			NR = "OC";
+			NU = "OC";
+			NZ = "OC";
+			OM = "AS";
+			OS = "AS";
+			PA = "NA";
+			PE = "SA";
+			PF = "OC";
+			PG = "OC";
+			PH = "AS";
+			PK = "AS";
+			PL = "EU";
+			PM = "NA";
+			PR = "NA";
+			PS = "AS";
+			PT = "EU";
+			PW = "OC";
+			PY = "SA";
+			QA = "AS";
+			RE = "AF";
+			RO = "EU";
+			RS = "EU";
+			RU = "EU";
+			RW = "AF";
+			SA = "AS";
+			SB = "OC";
+			SC = "AF";
+			SD = "AF";
+			SE = "EU";
+			SG = "AS";
+			SH = "AF";
+			SI = "EU";
+			SJ = "EU";
+			SK = "EU";
+			SL = "AF";
+			SM = "EU";
+			SN = "AF";
+			SO = "AF";
+			SR = "SA";
+			SS = "AF";
+			ST = "AF";
+			SV = "NA";
+			SY = "AS";
+			SZ = "AF";
+			TC = "NA";
+			TD = "AF";
+			TG = "AF";
+			TH = "AS";
+			TJ = "AS";
+			TK = "OC";
+			TM = "AS";
+			TN = "AF";
+			TO = "OC";
+			TP = "AS";
+			TR = "AS";
+			TT = "NA";
+			TV = "OC";
+			TW = "AS";
+			TZ = "AF";
+			UA = "EU";
+			UG = "AF";
+			US = "NA";
+			UY = "SA";
+			UZ = "AS";
+			VC = "NA";
+			VE = "SA";
+			VG = "NA";
+			VI = "NA";
+			VN = "AS";
+			VU = "OC";
+			WF = "OC";
+			WS = "OC";
+			XK = "EU";
+			YE = "AS";
+			YT = "AF";
+			ZA = "AF";
+			ZM = "AF";
+			ZW = "AF";
+		}::{[string]: string};
 	};
 
 	--- global leaderboards
@@ -283,7 +503,7 @@ local eep = {
 		};
 		--- recent games
 		recentstore = {
-			key = "eep_recentpostgame";
+			key = "eep_recentpostgame" .. structureversionkey;
 			value = nil :: MemoryStoreHashMap?;
 			heartbeat = 0;
 			expiry = 48*60*60;
@@ -314,7 +534,9 @@ local eep = {
 		badleaderboardsortedstore = "leaderboard sorted datastore is nil or not a datastore";
 		badpostgamesortedstore = "postgame sorted datastore is nil or not a datastore";
 		badpostgamerecentstore = "postgame recent memorystore is nil or not a memorystorehashmap";
+		badbrowsermemorystore = "browser memorystore is nil or not a memorystorehashmap";
 		badbrowserdatapacket = "browser data packet is not nil or a table";
+		browserunknownpullcontinentcode = "eep.browserpull() unknown continent code";
 		badbrowserdatapacketkey = "browser data packet key is nil or not a string";
 		badcreatereceiptenvironment = "eep.createreceipt() can only be called on server";
 		badreceipt = "receipt is not a string";
@@ -370,7 +592,12 @@ function eep.main(
 	assert(activitymap[defaultactivityindex], eep.assertions.nodefaultactivity)
 
 	if isserver then
+		--- populate browser regions with tables
+		for i, _ in ipairs(eep.browser.continentcodes) do
+			eep.browser.runtime[i] = table.create(200)::{buffer}
+		end
 		--- bindtoclose removeasyncs
+		--- print(scriptname(), "bindtoclose", os.clock())
 		game:BindToClose(function(closereason: Enum.CloseReason)
 			local datamodelkey = eep.datamodelkey(game.PrivateServerId)
 
@@ -387,30 +614,15 @@ function eep.main(
 
 			--- emit msg to remove server
 			if eep.readkey("publishbrowserentry") == true then
-				local packet = eep.createbrowserpacket()
-				packet.key = game.JobId
-				packet.value = nil
-				packet.timestamp = DateTime.now().UnixTimestampMillis
-
-				local publishasyncsuccess, publishasyncresult = pcall(MessagingService.PublishAsync, MessagingService, eep.browser.store.topic, packet)
-				if publishasyncsuccess then
-					--- ok
-					--- print("emitted browser closure packet for this server")
-				else
-					warn(scriptname(), "bindtoclose browser publishasync error:", publishasyncresult)
-				end
+				eep.browserclearlisting()
 			end
 		end)
 
-		--- playerremoving remove userid from parties
-		Players.PlayerRemoving:Connect(function(player: Player)
-			local userid = player.UserId
-			local stringuserid = tostring(player.UserId)
-		end)
-
+		--- print(scriptname(), "resolving datamodelkey", os.clock())
 		--- write datamodel key
 		eep.datamodel.key = eep.datamodelkey(game.PrivateServerId)
 
+		--- print(scriptname(), "starting heartbeats", os.clock())
 		--- start all heartbeats (also inits their associated memorystores)
 		eep.sharedinstancestoreheartbeat()
 		eep.datamodelheartbeat()
@@ -419,6 +631,7 @@ function eep.main(
 		eep.leaderboardheartbeat()
 		eep.postgameheartbeat()
 
+		--- print(scriptname(), "resolving sharedinstance", os.clock())
 		--- placeholder
 		if eep.datamodel.key == "~" then
 			local activityindex = defaultactivityindex
@@ -445,6 +658,7 @@ function eep.main(
 		local activityindex = defaultactivityindex
 		local sharedinstancekey = ""
 
+		--- print(scriptname(), "resolving datamodel", os.clock())
 		--- resolve datamodel value, write to this table
 		local datamodelsuccess, datamodelvalue = eep.datamodelresolve()
 
@@ -468,8 +682,10 @@ function eep.main(
 
 		end
 
+		--- print(scriptname(), "writing activity", os.clock())
 		eep.activitywrite(activityindex, activitymap[activityindex])
 
+		--- print(scriptname(), "resolving sharedinstance", os.clock())
 		--- resolve shared instance
 		local sharedinstance = nil
 
@@ -493,9 +709,12 @@ function eep.main(
 			eep.sharedinstanceresync(sharedinstance, sharedinstance.timestamp)
 		end
 
+		--- print(scriptname(), "resolving server region", os.clock())
 		--- resolve server region
 		local regionindex = eep.readserverregion()
 		eep.browser.regionindex = regionindex
+		
+		--- print(scriptname(), "done", os.clock())
 	else
 		if loadingscreenprog then
 			pcall(loadingscreenprog, "waiting for server...", 0)
@@ -577,13 +796,13 @@ function eep.main(
 	--- conclude
 	local elapsed = DateTime.now().UnixTimestampMillis - start
 	print(scriptname(), string.format(
-		"eep.main() (%s)\ntime: %dms\nmoduleset: '%s' (%d)\nreceipt: %s\n",
+		"eep.main() (%s)\n> time: %dms\n> moduleset: '%s' (%d)\n> receipt: %s\n> sharedinstance:",
 		isserver and "server" or "client",
 		elapsed,
 		moduleset,
 		#modules,
 		eep.createreceipt()
-	), "sharedinstance:", eep.sharedinstance.value)
+	), eep.sharedinstance.value)
 	
 	--- remove loading screen
 	if loadingscreendestroy then
@@ -596,11 +815,12 @@ end
 --- creates a minimal client-exposable receipt for running eep.main()
 function eep.createreceipt()
 	return string.format(
-		"%d!%d!%s!%d",
-		eep.sharedinstance.peerindex,
+		"%d!%d!%d!%s!%s",
 		eep.activity.index,
-		eep.sharedinstance.key,
-		eep.browser.regionindex
+		eep.sharedinstance.peerindex,
+		eep.browser.regionindex,
+		structureversionkey,
+		eep.sharedinstance.key
 	)
 end
 
@@ -609,10 +829,11 @@ function eep.receiptread(r: string)
 	local split = string.split(r, "!")
 
 	return {
-		peerindex = tonumber(split[1])::number;
-		activityindex = tonumber(split[2])::number;
-		sharedinstancekey = split[3];
-		regionindex = tonumber(split[4])::number
+		activityindex = tonumber(split[1])::number;
+		peerindex = tonumber(split[2])::number;
+		regionindex = tonumber(split[3])::number;
+		structureversionkey = split[4];
+		sharedinstancekey = split[5];
 	}
 end
 
@@ -649,6 +870,36 @@ function eep.teleporttoserver(players: {Player})
 	assert(isstudio == false, string.format("%s cannot teleport if calling environment is in studio", scriptname()))
 
 	return pcall(TeleportService.TeleportAsync, TeleportService, game.PlaceId, players, nil)
+end
+
+--- returns region index (continent code) of `player`'s geolocation
+function eep.readplayerregion(player: Player)
+	local countrycode = LocalizationService:GetCountryRegionForPlayerAsync(player)
+	local continentcode = eep.browser.countryisotocontinentcode[countrycode]
+
+	return table.find(eep.browser.continentcodes, continentcode) or #eep.browser.continentcodes
+end
+
+function eep.createuseridconcat(userids: {number}, now: number)
+	local ti = buffer.create(8 + (8 * #userids))
+	buffer.writef64(ti, 0, now)
+	for i, userid in ipairs(userids) do
+		buffer.writef64(ti, i * 8, userid)
+	end
+
+	return ti
+end
+
+function eep.unpackuseridconcat(concat: buffer)
+	local timestamp = buffer.readf64(concat, 0)
+	local len = (buffer.len(concat) // 8) - 1
+	local result = table.create(len)::{number}
+
+	for i = 1, len do
+		table.insert(result, buffer.readf64(concat, i * 8))
+	end
+
+	return timestamp, result
 end
 
 ---           $$\                                           $$\ $$\                       $$\                                             
@@ -780,7 +1031,7 @@ end
 --- returns index-peer pair of sharedinstance from non-datamodel-keyed privateserverid \
 --- does not have safety against `peer.privateserverid == "" & privateserverid == ""` for compatibility with placeholder sharedinstances
 function eep.sharedinstancefindpeer(si: typeof(eep.createsharedinstance(...)), privateserverid: string): (number?, typeof(eep.createsharedinstance(...).peers[1])?)
-	for index, peer in ipairs(si.peers) do
+	for index, peer in ipairs(si.peers or {}) do
 		if peer.privateserverid == privateserverid then
 
 			return index, peer
@@ -1049,33 +1300,85 @@ end
 function eep.talkingstickheartbeat()
 	local talkingstickstore = eep.talkingstick.store
 
-	--- attempt claim
-	--- if claim success:
-	--- 	talkingstickclaimed(true)
-	--- 		pull baton
-	---			write/read/apply matchmaking
-	--- 		update baton
-	--- 		push baton
-	--- if claim failure:
-	--- 	talkingstickclaimed(false)
-	--- 		pull baton
-	---			read/apply matchmaking
 	local function talkingstickheartbeat()
 		if eep.readkey("doclaimtalkingstick") == true then
-			local hastalkingstick = eep.talkingstickattemptclaim()
+			local hastalkingstick, talkingstickjobid = eep.talkingstickattemptclaim()
 			if hastalkingstick then
 				--- claimed
 			else
 				--- do nothing
 			end
+			eep.talkingsticksubscribe(hastalkingstick)
 
 			--- print("claim talkingstick result:", hastalkingstick)
 
-			eep.talkingstickclaimed(hastalkingstick)
+			eep.talkingstickclaimed(hastalkingstick, talkingstickjobid)
 		end
 	end
 
 	framerule(talkingstickstore.heartbeat, -1, talkingstickheartbeat)
+end
+
+function eep.talkingsticksubscribe(state: boolean)
+	local talkingstickstore = eep.talkingstick.store
+	local regiontopic = talkingstickstore.topic .. eep.talkingstick.separator .. eep.browser.regionindex
+
+	if state == true then
+		if talkingstickstore.subscribeasyncconnection == nil then
+			local subscribeasyncsuccess, subscribeasyncresult = pcall(
+				MessagingService.SubscribeAsync,
+				MessagingService,
+				regiontopic,
+				function(t: { Data: any; Sent: number })
+					eep.talkingstickmessagereceived(t.Data, t.Sent * 1000)
+				end
+			)
+			if subscribeasyncsuccess then
+				--- ok
+				talkingstickstore.subscribeasyncconnection = subscribeasyncresult
+			else
+				warn(scriptname(), "talkingstick subscribeasync error:", subscribeasyncresult)
+			end
+		end
+	else
+		if talkingstickstore.subscribeasyncconnection then
+			talkingstickstore.subscribeasyncconnection:Disconnect()
+			talkingstickstore.subscribeasyncconnection = nil
+		end
+	end
+end
+
+function eep.talkingsticksendmessage(data: any, regionindex: number?)
+	local talkingstickstore = eep.talkingstick.store
+	local regiontopic = talkingstickstore.topic .. eep.talkingstick.separator .. (regionindex or eep.browser.regionindex)
+
+	return pcall(
+		MessagingService.PublishAsync,
+		MessagingService,
+		regiontopic,
+		data
+	)
+end
+
+--- to be overwritten externally \
+--- fired when this server (if it has the talking stick) receives a message
+function eep.talkingstickmessagereceived(data: any, unixtimestampmillis: number)
+	
+end
+
+function eep.talkingstickupdatebaton(transform: (value: any) -> (any), regionindex: number?)
+	local talkingstickbaton = eep.talkingstick.baton
+
+	local datamodelhashmap = eep.datamodel.store.value
+	assert(datamodelhashmap and datamodelhashmap:IsA("MemoryStoreHashMap"), eep.assertions.baddatamodelmemorystore)
+
+	return pcall(
+		datamodelhashmap.UpdateAsync,
+		datamodelhashmap,
+		talkingstickbaton.key .. eep.talkingstick.separator .. (regionindex or eep.browser.regionindex),
+		transform,
+		talkingstickbaton.expiry
+	)
 end
 
 function eep.talkingstickreadbaton()
@@ -1106,8 +1409,9 @@ function eep.talkingstickpushbaton()
 	)
 end
 
---- to be overwritten externally
-function eep.talkingstickclaimed(hastalkingstick: boolean)
+--- to be overwritten externally \
+--- fires regardless if the talking stick is already claimed by this datamodel
+function eep.talkingstickclaimed(hastalkingstick: boolean, talkingstickjobid: string?)
 
 end
 
@@ -1127,13 +1431,21 @@ function eep.talkingstickattemptclaim()
 	local datamodelhashmap = eep.datamodel.store.value
 	assert(datamodelhashmap and datamodelhashmap:IsA("MemoryStoreHashMap"), eep.assertions.baddatamodelmemorystore)
 
+	local talkingstickjobid: string? = nil
 	local talkingsticksuccess, talkingstickresult = pcall(
 		datamodelhashmap.UpdateAsync,
 		datamodelhashmap,
 		talkingstickstore.key .. eep.talkingstick.separator .. eep.browser.regionindex,
 		function(t: typeof(eep.createtalkingstick())?): any
+			if type(t) == "table" then
+				talkingstickjobid = t.jobid
+			end
+
 			if t == nil or t and t.jobid == game.JobId then
-				return eep.createtalkingstick()
+				t = eep.createtalkingstick()
+				talkingstickjobid = t.jobid
+
+				return t
 
 			else
 				return nil
@@ -1150,7 +1462,7 @@ function eep.talkingstickattemptclaim()
 		warn(scriptname(), "claim talking stick error:", talkingstickresult)
 	end
 
-	return eep.talkingstick.hastalkingstick
+	return eep.talkingstick.hastalkingstick, talkingstickjobid
 end
 
 --- $$\                                                                       
@@ -1167,73 +1479,96 @@ end
 
 --- runs browser heartbeat
 function eep.browserheartbeat()
+	--- shared instance memorystore
 	local browserstore = eep.browser.store
-	local topic = browserstore.topic
+	browserstore.value = MemoryStoreService:GetHashMap(browserstore.key)
+	local browserhashmap = browserstore.value
+end
 
-	local function browserheartbeat()
-		if eep.readkey("dobrowserrefresh") == true then
-			if browserstore.subscribeasyncconnection == nil then
-				local subscribeasyncsuccess, subscribeasyncresult = pcall(MessagingService.SubscribeAsync, MessagingService, topic, function(t: { Data: typeof(eep.createbrowserpacket()); Sent: number })
-					local data = t.Data
-					assert(type(data) == "table", eep.assertions.badbrowserdatapacket)
+function eep.browsergetasync()
+	local browserstore = eep.browser.store
 
-					local key = data.key
-					local value = data.value
-					assert(type(key) == "string", eep.assertions.badbrowserdatapacketkey)
+	local browserhashmap = browserstore.value
+	assert(browserhashmap and browserhashmap:IsA("MemoryStoreHashMap"), eep.assertions.badbrowsermemorystore)
 
-					if type(value) == "nil" then
-						--- instruction to remove server from listing
-						eep.browser.cache[key] = nil
-					else
-						--- print(string.format("%s got packet from server %s @ %d (%s):", scriptname(), key, t.Sent, type(value)), value)
-						eep.browser.cache[key] = data
-					end
-				end)
-				if subscribeasyncsuccess then
-					--- ok
-					browserstore.subscribeasyncconnection = subscribeasyncresult
-				else
-					warn(scriptname(), "browser subscribeasync error:", subscribeasyncresult)
-				end
-			end
-		end
+	local browserpullcache = eep.browser.cache
+	table.clear(browserpullcache)
 
-		if eep.readkey("publishbrowserentry") ~= true then return end
+	local result = {}
+	for _, continentcode in ipairs(eep.browser.pullrange) do
+		local pullregionindex = table.find(eep.browser.continentcodes, continentcode)
+		if pullregionindex then
+			local key = browserstore.key .. eep.browser.separator .. continentcode
 
-		--- attempt to retry if regionindex is 0
-		local now = DateTime.now().UnixTimestampMillis
-		if eep.browser.regionindex == 0 then
-			if eep.browser.zeroindexlastretry < now then
-				eep.browser.zeroindexlastretry = now + eep.browser.zeroindexretrycooldownms
-
-				eep.browser.regionindex = eep.readserverregion()
-			end
-		end
-
-		local data = browserstore.data
-		if data ~= nil then
-			local packet = eep.createbrowserpacket()
-			packet.key = game.JobId
-			packet.value = data
-			packet.timestamp = DateTime.now().UnixTimestampMillis
-
-			local publishasyncsuccess, publishasyncresult = pcall(MessagingService.PublishAsync, MessagingService, topic, packet)
-			if publishasyncsuccess then
-				--- ok
-				--- print("published packet", packet, "@", packet.timestamp)
+			local getasyncsuccess, getasyncresult = pcall(
+				browserhashmap.GetAsync,
+				browserhashmap,
+				key
+			)
+			if getasyncsuccess then
+				browserpullcache[continentcode] = getasyncresult
+				result[continentcode] = getasyncresult
 			else
-				warn(scriptname(), "browser publishasync error:", publishasyncresult)
+				warn(scriptname(), "eep.browsergetasync error", getasyncresult)
 			end
 		end
 	end
-		
-	framerule(browserstore.heartbeat, -1, browserheartbeat)
+
+	return result
+end
+
+function eep.browsersetasync(regionindex: number, value: any)
+	local browserstore = eep.browser.store
+
+	local browserhashmap = browserstore.value
+	assert(browserhashmap and browserhashmap:IsA("MemoryStoreHashMap"), eep.assertions.badbrowsermemorystore)
+
+	local continentcode = eep.browser.continentcodes[regionindex] or eep.browser.continentcodes[#eep.browser.continentcodes]
+	local key = browserstore.key .. eep.browser.separator .. continentcode
+
+	return pcall(
+		browserhashmap.SetAsync,
+		browserhashmap,
+		key,
+		value,
+		browserstore.expiry
+	)
+end
+
+--[[--- getasync-s all regions \
+--- unit cost: `#eep.browser.pullrange`
+function eep.browserpull(transform: (regiontable: {any}?) -> any)
+	local browserstore = eep.browser.store
+
+	local browserhashmap = browserstore.value
+	assert(browserhashmap and browserhashmap:IsA("MemoryStoreHashMap"), eep.assertions.badbrowsermemorystore)
+
+	
+end
+
+function eep.browserupdatelisting(transform: (regiontable: {any}?) -> any)
+	local browserstore = eep.browser.store
+
+	local browserhashmap = browserstore.value
+	assert(browserhashmap and browserhashmap:IsA("MemoryStoreHashMap"), eep.assertions.badbrowsermemorystore)
+	
+	local regionindex = eep.browser.regionindex
+	local continentcode = eep.browser.continentcodes[regionindex] or eep.browser.continentcodes[#eep.browser.continentcodes]
+	local key = browserstore.key .. eep.browser.separator .. continentcode
+
+	
+end]]
+
+--- to be overwritten externally \
+--- clears browser listing associated with this datamodel
+function eep.browserclearlisting()
+	
 end
 
 function eep.readserverregion()
-	local index = 0
-	local query = eep.browser.ipapiquery
-	local field = eep.browser.ipapifield
+	--[[local index = 0
+	local query = "http://ip-api.com/json/?fields="
+	local field = "continentCode"
 	local getasyncsuccess, getasyncresult = pcall(HttpService.GetAsync, HttpService, query .. field)
 	if getasyncsuccess then
 		local response = HttpService:JSONDecode(getasyncresult)
@@ -1242,6 +1577,25 @@ function eep.readserverregion()
 			index = table.find(eep.browser.continentcodes, fieldvalue) or 0
 			if eep.browser.continentcodes[index] == nil then
 				warn(scriptname(), string.format("unknown continent code '%s'", fieldvalue or tostring(fieldvalue)))
+			end
+		else
+			warn(scriptname(), string.format("getasync response didn't decode into a table (decoded into: %s)", type(response)))
+		end
+	else
+		warn(scriptname(), "readserverregion error:", getasyncresult)
+	end]]
+
+	--- ipconfig.io
+	local index = #eep.browser.continentcodes
+	local getasyncsuccess, getasyncresult = pcall(HttpService.GetAsync, HttpService, "https://ipconfig.io/json")
+	if getasyncsuccess then
+		--- print(getasyncresult)
+		local response = HttpService:JSONDecode(getasyncresult)
+		if type(response) == "table" then
+			local countryiso = response.country_iso or "??"
+			local continentcode = eep.browser.countryisotocontinentcode[countryiso]
+			if continentcode then
+				index = table.find(eep.browser.continentcodes, continentcode) or #eep.browser.continentcodes
 			end
 		else
 			warn(scriptname(), string.format("getasync response didn't decode into a table (decoded into: %s)", type(response)))
