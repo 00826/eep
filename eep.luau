@@ -11,7 +11,7 @@ local TeleportService = game:GetService("TeleportService")
 local isserver = RunService:IsServer()
 local isstudio = RunService:IsStudio()
 
-local structureversionkey = string.format("%x", 2)
+local structureversionkey = string.format("%x", 0)
 
 --- runs function at `step` second interval for `time` seconds \
 --- exceptions: \
@@ -175,6 +175,32 @@ local eep = {
 		separator = "_";
 		hastalkingstick = false;
 	};
+	--- private servers
+	privateservers = {
+		store = {
+			key = "eep_privateservers" .. structureversionkey;
+			value = nil :: MemoryStoreHashMap?;
+			--- 3600 = 1h
+			--- 86400 = 1d
+			expiry = 1 * 86400;
+			heartbeat = 0;
+		};
+
+		--- return value of getasync(game.privateserverid)
+		datamodel = {
+			key = "";
+			value = nil :: any;
+			accesscode = "";
+			privateserverid = "";
+			roles = {};
+		};
+
+		--- {[string stringuserid]: {string datamodelkeyinvite}}
+		stringuseridinvites = {}::{[string]: {string}};
+
+		keycache = {}::{[string]: any};
+		privateserveridcache = {}::{[string]: any};
+	};
 	--- browser
 	browser = {
 		store = {
@@ -206,10 +232,10 @@ local eep = {
 			"NA"; --- north america
 			"SA"; --- south america
 			"EU"; --- europe
-			"AF"; --- africa
+			-- "AF"; --- africa
 			"AS"; --- asia
 			"OC"; --- oceania
-			"AN"; --- antarctica
+			--- "AN"; --- antarctica
 			"??"; --- unknown
 		};
 		countryisotocontinentcode = {
@@ -534,6 +560,7 @@ local eep = {
 		badleaderboardsortedstore = "leaderboard sorted datastore is nil or not a datastore";
 		badpostgamesortedstore = "postgame sorted datastore is nil or not a datastore";
 		badpostgamerecentstore = "postgame recent memorystore is nil or not a memorystorehashmap";
+		badprivateservermemorystore = "private server memorystore is nil or not a memorystorehashmap";
 		badbrowsermemorystore = "browser memorystore is nil or not a memorystorehashmap";
 		badbrowserdatapacket = "browser data packet is not nil or a table";
 		browserunknownpullcontinentcode = "eep.browserpull() unknown continent code";
@@ -541,9 +568,9 @@ local eep = {
 		badcreatereceiptenvironment = "eep.createreceipt() can only be called on server";
 		badreceipt = "receipt is not a string";
 		badactivityrules = "activity rules are nil or not a table";
-		badactivitymoduleset = "activity moduleset is nil or not a table";
+		badactivitymoduleset = "activity moduleset (%s) is nil or not a table";
 		badmodulescript = "modulescript in moduleset is not a modulescript";
-	};
+	}::{[string]: string};
 
 	receiptflag = "eep_receipt";
 	receiptstring = "";
@@ -627,6 +654,7 @@ function eep.main(
 		eep.sharedinstancestoreheartbeat()
 		eep.datamodelheartbeat()
 		eep.talkingstickheartbeat()
+		eep.privateserverheartbeat()
 		eep.browserheartbeat()
 		eep.leaderboardheartbeat()
 		eep.postgameheartbeat()
@@ -739,6 +767,7 @@ function eep.main(
 		
 		eep.sharedinstance.key = receipt.sharedinstancekey
 		eep.sharedinstance.peerindex = receipt.peerindex
+		eep.privateservers.datamodel.key = receipt.privateserverdatamodelkey
 		
 		eep.browser.regionindex = receipt.regionindex
 		
@@ -750,9 +779,9 @@ function eep.main(
 	--- one-time ordered require
 	local activity = eep.activity
 	local moduleset = activity.value.moduleset
-	assert(moduleset, eep.assertions.badactivitymoduleset)
+	assert(moduleset, string.format(eep.assertions.badactivitymoduleset, tostring(activity.value)))
 	local modules = modulesets[moduleset]
-	assert(modules, eep.assertions.badactivitymoduleset)
+	assert(modules, string.format(eep.assertions.badactivitymoduleset, tostring(activity.value)))
 
 	--- one time ordered require
 	for i, modulescript in ipairs(modules) do
@@ -787,7 +816,7 @@ function eep.main(
 	--- script attribute receipt after all modules loaded
 	if isserver then
 		local r = eep.createreceipt()
-		assert(string.len(r) <= 50, "string exceeds 50-character workspace.NextGenerationReplication attribute limit")
+		--- assert(string.len(r) <= 50, "string exceeds 50-character workspace.NextGenerationReplication attribute limit")
 		
 		script:SetAttribute(eep.receiptflag, r)
 		eep.receiptstring = r
@@ -796,11 +825,12 @@ function eep.main(
 	--- conclude
 	local elapsed = DateTime.now().UnixTimestampMillis - start
 	print(scriptname(), string.format(
-		"eep.main() (%s)\n> time: %dms\n> moduleset: '%s' (%d)\n> receipt: %s\n> sharedinstance:",
+		"eep.main() (%s)\n> time: %dms\n> moduleset: '%s' (%d)\n> ps datamodelkey: %s\n> receipt: %s\n> sharedinstance:",
 		isserver and "server" or "client",
 		elapsed,
 		moduleset,
 		#modules,
+		eep.privateservers.datamodel.key,
 		eep.createreceipt()
 	), eep.sharedinstance.value)
 	
@@ -815,11 +845,12 @@ end
 --- creates a minimal client-exposable receipt for running eep.main()
 function eep.createreceipt()
 	return string.format(
-		"%d!%d!%d!%s!%s",
+		"%d!%d!%d!%s!%s!%s",
 		eep.activity.index,
 		eep.sharedinstance.peerindex,
 		eep.browser.regionindex,
 		structureversionkey,
+		eep.privateservers.datamodel.key or "",
 		eep.sharedinstance.key
 	)
 end
@@ -833,7 +864,8 @@ function eep.receiptread(r: string)
 		peerindex = tonumber(split[2])::number;
 		regionindex = tonumber(split[3])::number;
 		structureversionkey = split[4];
-		sharedinstancekey = split[5];
+		privateserverdatamodelkey = split[5];
+		sharedinstancekey = split[6];
 	}
 end
 
@@ -1465,6 +1497,227 @@ function eep.talkingstickattemptclaim()
 	return eep.talkingstick.hastalkingstick, talkingstickjobid
 end
 
+---  $$$$$$\       $$$$$$$\  $$$$$$\   $$$$$$\  $$\    $$\  $$$$$$\   $$$$$$\   $$$$$$$\ 
+--- $$  __$$\     $$  _____|$$  __$$\ $$  __$$\ \$$\  $$  |$$  __$$\ $$  __$$\ $$  _____|
+--- $$ /  $$ |    \$$$$$$\  $$$$$$$$ |$$ |  \__| \$$\$$  / $$$$$$$$ |$$ |  \__|\$$$$$$\  
+--- $$ |  $$ |     \____$$\ $$   ____|$$ |        \$$$  /  $$   ____|$$ |       \____$$\ 
+--- $$$$$$$  |$$\ $$$$$$$  |\$$$$$$$\ $$ |         \$  /   \$$$$$$$\ $$ |      $$$$$$$  |
+--- $$  ____/ \__|\_______/  \_______|\__|          \_/     \_______|\__|      \_______/ 
+--- $$ |                                                                                 
+--- $$ |                                                                                 
+--- \__|                                                                                 
+
+--- runs browser heartbeat
+function eep.privateserverheartbeat()
+	--- shared instance memorystore
+	local pserverstore = eep.privateservers.store
+	pserverstore.value = MemoryStoreService:GetHashMap(pserverstore.key)
+
+	local privateserverid = game.PrivateServerId
+	if privateserverid ~= "" then
+		--- print(string.format("HELLO MY NAME IS '%s'", privateserverid))
+		local pserverhashmap = pserverstore.value
+		assert(pserverhashmap and pserverhashmap:IsA("MemoryStoreHashMap"), eep.assertions.badprivateservermemorystore)
+
+		local keygetasyncsuccess, keygetasyncresult: typeof(eep.createprivateserverprivateserveridvalue()) = pcall(
+			pserverhashmap.GetAsync,
+			pserverhashmap,
+			privateserverid
+		)
+		if keygetasyncsuccess then
+			if type(keygetasyncresult) == "table" then
+				local privateserverdatamodel = eep.privateservers.datamodel
+
+				print(scriptname(), "pserverhashmap keygetasync success:", keygetasyncresult)
+				for k, v in keygetasyncresult::any do
+					privateserverdatamodel[k] = v
+				end
+			else
+				warn(scriptname(), string.format("pserverhashmap keygetasync expected table, got %s", type(keygetasyncresult)))
+			end
+		else
+			warn(scriptname(), "eep.privateserverheartbeat keygetasync error", keygetasyncresult)
+		end
+	end
+end
+
+--- `key` holds a pointer to another key `privateserverid` to guarantee exclusivity for that specific key \
+--- `privateserverid` holds variant information \
+--- \
+--- "Access codes remain valid indefinitely, meaning reserved servers can still be joined if no game server is running (in this case a new server will be started)."
+--- "The DataModel.PrivateServerId is constant across all server instances associated with the server access code, the DataModel.JobId is not."
+function eep.privateserverpublish(key: string, value: any)
+	local pserverstore = eep.privateservers.store
+
+	local pserverhashmap = pserverstore.value
+	assert(pserverhashmap and pserverhashmap:IsA("MemoryStoreHashMap"), eep.assertions.badprivateservermemorystore)
+
+	if (eep.privateservers.datamodel.key == key) and (key ~= "") then
+		eep.privateservers.datamodel.value = value
+	end
+
+	local keyupdateasyncsuccess, keyupdateasyncresult = pcall(
+		pserverhashmap.UpdateAsync,
+		pserverhashmap,
+		key,
+		function(t: typeof(eep.createprivateserverkeyvalue())?)
+			if type(t) ~= "table" then
+				t = eep.createprivateserverkeyvalue()
+			end
+
+			for k, v in t::any do
+				--- print(k, v)
+			end
+
+			--- impossible
+			assert(t)
+
+			t.key = key
+			if type(t.privateserverid) ~= "string" then
+				print("reset privateserverid")
+				t.privateserverid = ""
+			end
+			if type(t.accesscode) ~= "string" then
+				print("reset accesscode")
+				t.accesscode = ""
+			end
+
+			if t.privateserverid == "" then
+				if isstudio then
+					warn("is studio instance, private server will not be reserved")
+				else
+					local accesscode, privateserverid = TeleportService:ReserveServerAsync(game.PlaceId)
+					t.accesscode = accesscode
+					t.privateserverid = privateserverid
+				end
+			end
+
+			print(string.format(
+				"%s (keyupdate) pserverhashmap[%s] =",
+				scriptname(),
+				key
+			), t)
+
+			eep.privateservers.keycache[key] = t
+
+			return t
+		end,
+		pserverstore.expiry
+	)
+	if keyupdateasyncsuccess then
+		if type(keyupdateasyncresult) == "table" then
+			local privateserverid = keyupdateasyncresult.privateserverid
+			if privateserverid and privateserverid ~= "" then
+				local privateserveridupdateasyncsuccess, privateserveridupdateasyncresult = pcall(
+					pserverhashmap.UpdateAsync,
+					pserverhashmap,
+					privateserverid,
+					function(t: typeof(eep.createprivateserverprivateserveridvalue())?)
+						if type(t) ~= "table" then
+							t = eep.createprivateserverprivateserveridvalue()
+						end
+
+						--- patch
+						for k: any, v: any in eep.createprivateserverprivateserveridvalue()::any do
+							if (t::any)[k] == nil then
+								(t::any)[k] = v::any
+							end
+						end
+
+						--- impossible
+						assert(t)
+
+						t.key = key
+						t.value = value
+						t.accesscode = keyupdateasyncresult.accesscode
+						t.privateserverid = keyupdateasyncresult.privateserverid
+
+						print(string.format(
+							"%s (privateserveridupdate) pserverhashmap[%s] =",
+							scriptname(),
+							privateserverid::string
+						), t)
+
+						eep.privateservers.privateserveridcache[key] = t
+
+						return t
+					end,
+					pserverstore.expiry
+				)
+				if privateserveridupdateasyncsuccess then
+				else
+					warn(scriptname(), "eep.privateserverrefresh privateserveridupdateasync error", privateserveridupdateasyncresult)
+				end
+			end
+			
+			print(string.format(
+				"%s privateserverpublish result\n> key: %s\n> accesscode: %s\n> privateserverid: %s",
+				scriptname()::any,
+				key::any,
+				keyupdateasyncresult.accesscode,
+				keyupdateasyncresult.privateserverid
+			))
+		end
+	else
+		warn(scriptname(), "eep.privateserverrefresh keyupdateasync error", keyupdateasyncresult)
+	end
+end
+
+function eep.privateservergetasync(key: string)
+	local pserverstore = eep.privateservers.store
+
+	local pserverhashmap = pserverstore.value
+	assert(pserverhashmap and pserverhashmap:IsA("MemoryStoreHashMap"), eep.assertions.badprivateservermemorystore)
+
+	return pcall(
+		pserverhashmap.GetAsync,
+		pserverhashmap,
+		key
+	)
+end
+
+function eep.privateserveraddinvite(key: string, datamodelkey: string)
+	local invitecache = eep.privateservers.stringuseridinvites
+	if not invitecache[key] then
+		invitecache[key] = {}
+	end
+
+	if not table.find(invitecache[key], datamodelkey) then
+		table.insert(invitecache[key], datamodelkey)
+	end
+end
+
+function eep.privateserverreadinvites(key: string)
+	local invitecache = eep.privateservers.stringuseridinvites
+	return invitecache[key] or {}::{string}
+end
+
+function eep.createprivateserverkeyvalue()
+	return {
+		--- reference to key (intended to be stringuserid) associated with this private server
+		key = "";
+		--- used to actually teleport to the private server
+		accesscode = "";
+		--- reference to variant private server data
+		privateserverid = "";
+	}
+end
+
+function eep.createprivateserverprivateserveridvalue()
+	return {
+		--- reference to key (intended to be stringuserid) associated with this private server
+		key = "";
+		--- variant value
+		value = nil :: any;
+		--- static
+		roles = {} :: {[string]: number};
+		--- used to actually teleport to the private server
+		accesscode = "";
+		--- reference to variant private server data
+		privateserverid = "";
+	}
+end
+
 --- $$\                                                                       
 --- $$ |                                                                      
 --- $$$$$$$\   $$$$$$\   $$$$$$\  $$\  $$\  $$\  $$$$$$$\  $$$$$$\   $$$$$$\  
@@ -1479,10 +1732,9 @@ end
 
 --- runs browser heartbeat
 function eep.browserheartbeat()
-	--- shared instance memorystore
+	--- server browser memorystore
 	local browserstore = eep.browser.store
 	browserstore.value = MemoryStoreService:GetHashMap(browserstore.key)
-	local browserhashmap = browserstore.value
 end
 
 function eep.browsergetasync()
@@ -1535,30 +1787,6 @@ function eep.browsersetasync(regionindex: number, value: any)
 	)
 end
 
---[[--- getasync-s all regions \
---- unit cost: `#eep.browser.pullrange`
-function eep.browserpull(transform: (regiontable: {any}?) -> any)
-	local browserstore = eep.browser.store
-
-	local browserhashmap = browserstore.value
-	assert(browserhashmap and browserhashmap:IsA("MemoryStoreHashMap"), eep.assertions.badbrowsermemorystore)
-
-	
-end
-
-function eep.browserupdatelisting(transform: (regiontable: {any}?) -> any)
-	local browserstore = eep.browser.store
-
-	local browserhashmap = browserstore.value
-	assert(browserhashmap and browserhashmap:IsA("MemoryStoreHashMap"), eep.assertions.badbrowsermemorystore)
-	
-	local regionindex = eep.browser.regionindex
-	local continentcode = eep.browser.continentcodes[regionindex] or eep.browser.continentcodes[#eep.browser.continentcodes]
-	local key = browserstore.key .. eep.browser.separator .. continentcode
-
-	
-end]]
-
 --- to be overwritten externally \
 --- clears browser listing associated with this datamodel
 function eep.browserclearlisting()
@@ -1566,17 +1794,19 @@ function eep.browserclearlisting()
 end
 
 function eep.readserverregion()
-	--[[local index = 0
-	local query = "http://ip-api.com/json/?fields="
-	local field = "continentCode"
+	local index = #eep.browser.continentcodes
+
+	--- ip-api.com
+	--[[local query = "http://ip-api.com/json/?fields="
+	local field = "countryCode"
 	local getasyncsuccess, getasyncresult = pcall(HttpService.GetAsync, HttpService, query .. field)
 	if getasyncsuccess then
 		local response = HttpService:JSONDecode(getasyncresult)
 		if type(response) == "table" then
-			local fieldvalue = response[field]
-			index = table.find(eep.browser.continentcodes, fieldvalue) or 0
-			if eep.browser.continentcodes[index] == nil then
-				warn(scriptname(), string.format("unknown continent code '%s'", fieldvalue or tostring(fieldvalue)))
+			local countryiso = response[field] or "??"
+			local continentcode = eep.browser.countryisotocontinentcode[countryiso]
+			if continentcode then
+				index = table.find(eep.browser.continentcodes, continentcode) or #eep.browser.continentcodes
 			end
 		else
 			warn(scriptname(), string.format("getasync response didn't decode into a table (decoded into: %s)", type(response)))
@@ -1586,7 +1816,6 @@ function eep.readserverregion()
 	end]]
 
 	--- ipconfig.io
-	local index = #eep.browser.continentcodes
 	local getasyncsuccess, getasyncresult = pcall(HttpService.GetAsync, HttpService, "https://ipconfig.io/json")
 	if getasyncsuccess then
 		--- print(getasyncresult)
@@ -1690,6 +1919,10 @@ function eep.leaderboardpull()
 				result[k] = truncated
 			end
 		end
+
+		eep.leaderboardpulled(getasyncresult)
+	else
+		warn(scriptname(), "eep.leaderboardpull() getasync failure", getasyncresult)
 	end
 
 	for k, t in result do
@@ -1697,6 +1930,10 @@ function eep.leaderboardpull()
 	end
 
 	return getasyncsuccess, getasyncresult
+end
+
+function eep.leaderboardpulled(pullresult: any)
+	
 end
 
 function eep.leaderboardcomp(a: typeof(eep.createleaderboardentry()), b: typeof(eep.createleaderboardentry()))
