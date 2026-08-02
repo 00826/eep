@@ -182,7 +182,7 @@ local eep = {
 			value = nil :: MemoryStoreHashMap?;
 			--- 3600 = 1h
 			--- 86400 = 1d
-			expiry = 1 * 86400;
+			expiry = 6 * 3600;
 			heartbeat = 0;
 		};
 
